@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# Lrom 启动脚本 —— 无需安装，直接运行。
+#
+#   ./lrom              交互式菜单
+#   ./lrom devices      子命令
+#
+# Lrom 零第三方依赖（仅用 Python 标准库），因此不需要 venv，
+# 只要系统有 Python >= 3.10 即可运行。
+#
+# 卸载：直接删除本仓库目录即可。
+
+set -euo pipefail
+
+SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# 找到合适的 Python
+PY=""
+for cand in python3.13 python3.12 python3.11 python3.10 python3; do
+  if command -v "$cand" >/dev/null 2>&1; then
+    if "$cand" -c 'import sys; sys.exit(0 if sys.version_info >= (3,10) else 1)' 2>/dev/null; then
+      PY="$cand"
+      break
+    fi
+  fi
+done
+
+if [ -z "$PY" ]; then
+  echo "错误: 未找到 Python 3.10 或更高版本" >&2
+  echo "  Debian/Ubuntu/Kali: sudo apt install python3" >&2
+  echo "  Arch:               sudo pacman -S python" >&2
+  exit 1
+fi
+
+export PYTHONPATH="$SRC_DIR/src${PYTHONPATH:+:$PYTHONPATH}"
+exec "$PY" -m lrom "$@"

@@ -93,14 +93,57 @@ EOF
 fi
 
 # ---------------------------------------------------------------------------
-# 3) 创建 venv 并安装
-echo "==> 创建虚拟环境"
-python3 -m venv "$VENV"
-"$VENV/bin/pip" install --quiet --upgrade pip
-"$VENV/bin/pip" install --quiet -e "$SRC_DIR"
+# ---------------------------------------------------------------------------
+# 3) 提示：Lrom 其实不需要安装
+# ---------------------------------------------------------------------------
+cat <<'EOF'
+
+────────────────────────────────────────────────────────────────────
+  说明：Lrom 不需要安装！
+────────────────────────────────────────────────────────────────────
+
+  Lrom 是零第三方依赖的 Python 程序，克隆即可直接运行：
+
+      ./lrom                # 交互式菜单
+      ./lrom devices        # 子命令
+
+  卸载方法：直接删除本仓库目录即可，不会在系统中留下任何文件。
+
+  本安装脚本仅供希望把 lrom 加入 PATH 的用户使用
+  （这样可以在任意目录直接输入 lrom）。
+  如果你只是想在仓库目录内使用，可以直接 Ctrl+C 中止本脚本。
+
+────────────────────────────────────────────────────────────────────
+
+EOF
+
+if [ "${1:-}" != "-y" ] && [ "${1:-}" != "--yes" ]; then
+  printf "  继续安装到系统 PATH？(y/N): "
+  read -r ans
+  case "$ans" in
+    [yY]*) ;;
+    *) echo "  已取消。直接运行 ./lrom 即可使用。"; exit 0 ;;
+  esac
+fi
+
+# ---------------------------------------------------------------------------
+# 4) 创建 venv 并安装
+# ---------------------------------------------------------------------------
+if [ ! -d "$VENV" ]; then
+  echo "==> 创建虚拟环境"
+  python3 -m venv "$VENV"
+fi
+
+"$VENV/bin/pip" install --quiet --upgrade pip 2>/dev/null || true
+"$VENV/bin/pip" install --quiet -e "$SRC_DIR" 2>/dev/null || {
+  echo "警告: 网络问题，改用离线安装（Lrom 无第三方依赖）"
+  "$VENV/bin/pip" install --quiet --no-index --no-build-isolation -e "$SRC_DIR"
+}
 echo "==> 安装完成"
 
-# 4) 链接到 ~/.local/bin
+# ---------------------------------------------------------------------------
+# 5) 链接到 ~/.local/bin
+# ---------------------------------------------------------------------------
 mkdir -p "$BIN_DIR"
 ln -sf "$VENV/bin/lrom" "$BIN_DIR/lrom"
 
@@ -114,7 +157,10 @@ case ":$PATH:" in
     echo "  echo 'export PATH=\"\$HOME/.local/bin:\$PATH\"' >> ~/.zshrc   # 或 ~/.bashrc"
     ;;
 esac
+
+echo
+echo "卸载方法: 运行 ./uninstall.sh"
 echo
 echo "下一步:"
-echo "  lrom devices"
-echo "  lrom inspect <rom.zip>"
+echo "  lrom                 # 交互式菜单"
+echo "  lrom selfcheck       # 环境自检"

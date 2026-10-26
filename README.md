@@ -35,13 +35,31 @@ Lrom 是一个 **Linux 原生的 Android 线刷工具**。它把刷机拆成可�
 - ✅ **关键分区保护** — `persist`/`modemst`/`fsg` 等默认禁写
 - ✅ **零遥测** — 完全离线，不上报任何数据
 
-## 安装
+## 快速开始（无需安装）
 
 ```bash
 git clone https://github.com/Rovrry/Lrom.git
 cd Lrom
-./install.sh
+./lrom              # 交互式菜单
+./lrom devices      # 或直接用子命令
 ```
+
+**Lrom 零第三方依赖**（只用 Python 标准库），克隆即可运行，**不需要安装**。
+
+**卸载**：直接删除仓库目录即可，不会在系统中留下任何文件。
+
+<details>
+<summary>可选：把 lrom 加入 PATH（能在任意目录直接输入 <code>lrom</code>）</summary>
+
+```bash
+./install.sh        # 会询问确认
+```
+
+卸载系统安装：
+```bash
+./uninstall.sh
+```
+</details>
 
 需要 `adb` 与 `fastboot`（从发行版仓库安装，**不需要 root**，Linux 内核自带 USB 驱动）：
 
