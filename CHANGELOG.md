@@ -2,6 +2,25 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [未发布]
+
+### 新增
+
+- **逻辑分区写入前先 delete + create**
+  直接 `fastboot flash` 逻辑分区时，若目标分区不存在或容量不足会失败；
+  虚拟 A/B 的 COW 快照层（`xxx_a-cow` / `xxx_b-cow`）也可能残留旧数据。
+  现在会先 `delete-logical-partition`（4 种命名）再 `create-logical-partition`（两槽），
+  然后才写入。可用 `--no-recreate-logical` 关闭。
+- **双槽刷写 `--both-slots`**
+  每个分区刷完当前槽位后，再补刷另一槽位，避免切换槽位后回退到旧版本。
+- **FastbootD 切换超时提示**
+  OPLUS 设备的 fastbootd 可能显示语言选择界面并暂停。现在 15 秒未就绪会提示
+  "屏幕若有语言选择请手动点选"，超时后给出明确的排查步骤。等待上限提升至 300 秒。
+
+### 变更
+
+- 参考 [koaaN/Universal_Flasher](https://github.com/koaaN/Universal_Flasher) 的实战做法补齐上述细节
+
 ## [0.1.0] - 2026-10-26
 
 首个可发布版本。已在真实设备（OnePlus OPD2404 / Android 16）上完成端到端刷机验证。
