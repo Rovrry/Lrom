@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import re
 import shutil
+import threading
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -93,7 +94,10 @@ class PreflightIssue:
 
 
 def preflight(
-    plan: FlashPlan, image_dir: Path, device_parts: set[str] | None = None
+    plan: FlashPlan,
+    image_dir: Path,
+    device_parts: set[str] | None = None,
+    super_size: int | None = None,
 ) -> list[PreflightIssue]:
     """刷写前检查，返回问题列表。任何 error 都不应开始刷写。"""
     issues: list[PreflightIssue] = []
@@ -137,7 +141,31 @@ def preflight(
     except OSError:
         pass
 
-    # 4) 计划分区是否都在设备上
+    # 4) super 空间校验（逻辑分区）
+    logical = [op for op in plan.active_ops if op.phase is Phase.FASTBOOTD]
+    if logical:
+        need = sum(op.size for op in logical)
+        if super_size:
+            if need > super_size:
+                issues.append(
+                    PreflightIssue(
+                        "error",
+                        f"super 空间不足：逻辑分区需要 "
+                        f"{need / 2**30:.2f} GB，但 super 只有 "
+                        f"{super_size / 2**30:.2f} GB。"
+                        f"请去掉 --both-slots（逻辑分区不能双槽刷写）",
+                    )
+                )
+            else:
+                issues.append(
+                    PreflightIssue(
+                        "info",
+                        f"super 空间检查通过：需要 {need / 2**30:.2f} GB / "
+                        f"可用 {super_size / 2**30:.2f} GB",
+                    )
+                )
+
+    # 5) 计划分区是否都在设备上
     if device_parts:
         unknown = [
             op.partition
@@ -181,6 +209,8 @@ class FlashExecutor:
         on_progress: Callable[[str, int, int], None] | None = None,
         on_mode_change: Callable[[Phase], None] | None = None,
         on_notice: Callable[[str], None] | None = None,
+        on_progress_pending: Callable[[str, int, float], None] | None = None,
+        on_progress_done: Callable[[], None] | None = None,
         wipe_data: bool = False,
         both_slots: bool = False,
         recreate_logical: bool = True,
@@ -194,6 +224,8 @@ class FlashExecutor:
         self.on_progress = on_progress
         self.on_mode_change = on_mode_change
         self.on_notice = on_notice
+        self.on_progress_pending = on_progress_pending
+        self.on_progress_done = on_progress_done
         self.wipe_data = wipe_data
         self.both_slots = both_slots
         self.recreate_logical = recreate_logical
@@ -223,9 +255,28 @@ class FlashExecutor:
             )
 
         assert self.fb is not None
-        res: RunResult = self.fb.run(
-            "flash", op.partition, str(img), timeout=3600
-        )
+
+        # 大分区刷写耗时长（my_stock 可能 100 秒以上），
+        # 期间必须持续给用户反馈，否则用户会以为卡死而拔线。
+        stop_ticker = threading.Event()
+        ticker = None
+        if size > 20 * 1024 * 1024:
+            ticker = threading.Thread(
+                target=self._tick_progress,
+                args=(op.partition, size, start, stop_ticker),
+                daemon=True,
+            )
+            ticker.start()
+        try:
+            res: RunResult = self.fb.run(
+                "flash", op.partition, str(img), timeout=3600
+            )
+        finally:
+            stop_ticker.set()
+            if ticker is not None:
+                ticker.join(timeout=2)
+            if self.on_progress_done:
+                self.on_progress_done()
         duration = time.time() - start
 
         ok = self.fb.ok(res)
@@ -256,6 +307,15 @@ class FlashExecutor:
             message=msg,
             recovery_hint=_recovery_hint(op.partition, op.phase),
         )
+
+    def _tick_progress(
+        self, partition: str, size: int, start: float, stop: threading.Event
+    ) -> None:
+        """刷写进行中定期回调，让用户看到"还在动"。"""
+        if not self.on_progress_pending:
+            return
+        while not stop.wait(1.0):
+            self.on_progress_pending(partition, size, start)
 
     # -- 阶段 --------------------------------------------------------
 
@@ -368,10 +428,19 @@ class FlashExecutor:
     # -- 双槽刷写 -----------------------------------------------------
 
     def _flash_other_slot(self, op: FlashOp) -> StepResult | None:
-        """把同一镜像再刷到另一个槽位。"""
+        """把同一镜像再刷到另一个槽位。
+
+        ⚠️ 只用于物理分区。逻辑分区（super 内）绝不能双槽刷写：
+        super 是单个物理分区，两个槽位的逻辑分区共用同一空间。
+        双槽刷写会让空间需求翻倍，必然触发
+        "Not enough space to resize partition"。
+        """
         assert self.fb is not None
         if op.partition in ("super", "userdata", "metadata", "misc"):
             return None  # 非槽位分区
+        # 逻辑分区禁止双槽（关键安全约束）
+        if op.phase is Phase.FASTBOOTD:
+            return None
         if op.partition.endswith("_a") or op.partition.endswith("_b"):
             base = op.partition[:-2]
         else:

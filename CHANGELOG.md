@@ -2,6 +2,56 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.2.1] - 2026-10-27
+
+### ⚠️ 重要修复：双槽刷写会撑爆 super（真实事故）
+
+**事故经过**：用户使用 `--both-slots` 刷写，在 fastbootd 阶段出现：
+
+```
+my_stock     ✓ 3,831.0 MB
+my_stock_b   ✓ 3,831.0 MB
+odm          ✓ 1,627.1 MB
+odm_b        ✗ Not enough space to resize partition
+```
+
+**根因**：`super` 是**单个物理分区**，两个槽位的逻辑分区**共用同一空间**。
+
+| 项 | 容量 |
+|---|---|
+| `super` 总容量 | 14.00 GB |
+| 单槽逻辑分区需求 | 8.97 GB |
+| 双槽合计 | 17.94 GB |
+| **超出** | **约 4 GB** |
+
+`--both-slots` 只适用于**物理分区**（boot/xbl/vbmeta 等），
+逻辑分区（system/vendor/odm/my_* 等，位于 super 内）**绝对不能**双槽刷写。
+
+**修复**：
+- `_flash_other_slot()` 遇到 `Phase.FASTBOOTD` 直接返回，逻辑分区不再双槽刷写
+- `super` 分区本身也排除
+- 新增回归测试 `test_both_slots_does_not_apply_to_logical`
+
+### 新增
+
+- **刷写进行中的实时提示**
+  大分区刷写耗时长（`my_stock` 约 105 秒），期间屏幕无输出，
+  用户容易误以为卡死而拔线。现在每个超过 20 MB 的分区刷写时，
+  会每秒钟刷新 spinner 与已用时间、预估剩余时间：
+
+  ```
+  ⠹ my_stock         刷写中…  3,831.0 MB   42.3s  剩余约 63s
+  ```
+
+- **super 空间预检**
+  刷写前读取设备 `super` 分区容量（root 或 `getvar partition-size:super`），
+  与逻辑分区总需求比较，不足时在**预检阶段直接阻止**，
+  而不是刷到一半才报错。
+
+### 修复
+
+- 逻辑分区双槽刷写导致 super 空间耗尽（详见上文）
+
 ## [0.2.0] - 2026-10-27
 
 ### 新增

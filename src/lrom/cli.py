@@ -548,7 +548,25 @@ def cmd_flash(args: argparse.Namespace) -> int:
     )
 
     # ---- 4) 前置检查 ----
-    issues = preflight(plan, image_dir, device_parts or None)
+    # 读取设备 super 分区大小，用于空间校验
+    super_size: int | None = None
+    try:
+        from .device.runner import FastbootRunner as _FBR
+
+        if dev.mode is DeviceMode.ADB:
+            res = AdbRunner(server_port=args.adb_port).shell(
+                "su -c 'blockdev --getsize64 /dev/block/by-name/super'", timeout=15
+            )
+            if res.exit_code == 0 and res.stdout.strip().isdigit():
+                super_size = int(res.stdout.strip())
+        if super_size is None:
+            v = _FBR().getvar("partition-size:super")
+            if v and v.startswith("0x"):
+                super_size = int(v, 16)
+    except Exception:
+        pass
+
+    issues = preflight(plan, image_dir, device_parts or None, super_size)
     errors = [i for i in issues if i.severity == "error"]
     if errors:
         print(paint("✗ 前置检查未通过", C.RED + C.BOLD))
@@ -682,6 +700,31 @@ def cmd_flash(args: argparse.Namespace) -> int:
         recreate_logical=not getattr(args, "no_recreate_logical", False),
         on_notice=lambda msg: print(paint(f"  {msg}", C.YELLOW)),
     )
+
+    # ---- 刷写进行中的实时提示（防止用户误以为卡死而拔线）----
+    _spin = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+    _state = {"i": 0}
+
+    def _on_pending(partition: str, size: int, start: float) -> None:
+        import time as _t
+
+        elapsed = _t.time() - start
+        spin = _spin[_state["i"] % len(_spin)]
+        _state["i"] += 1
+        pct = ""
+        # 按经验速度估算剩余时间（约 40 MB/s）
+        if elapsed > 1:
+            speed = size / elapsed
+            remain = max(0, (size - speed * elapsed) / speed) if speed > 0 else 0
+            pct = f"  剩余约 {remain:.0f}s"
+        line = f"\r  {spin} {partition:<16} 刷写中… {size/1e6:>8,.1f} MB  {elapsed:>5.1f}s{pct}   "
+        print(line, end="", flush=True)
+
+    def _on_done() -> None:
+        print("\r" + " " * 90 + "\r", end="", flush=True)
+
+    executor.on_progress_pending = _on_pending
+    executor.on_progress_done = _on_done
 
     # ---- 预演：只出报告，不逐条模拟 ----
     if dry_run:

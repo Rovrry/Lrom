@@ -130,8 +130,25 @@ lrom flash ~/Downloads/rom.zip --images unpacked/rom
 | `--dry-run` | 预演检查，不写设备（见下方说明） |
 | `--wipe` | 清空用户数据（**降级/救砖必用**） |
 | `--partitions` | 只刷指定分区 |
+| `--both-slots` | 双槽刷写（**仅限物理分区**，见下方说明） |
 | `--allow-dangerous` | 允许写危险分区 |
 | `--force-arb` | 跳过 ARB 拦截（极度危险） |
+
+## ⚠️ `--both-slots` 的适用范围
+
+`--both-slots` **只对物理分区生效**（boot / xbl / vbmeta / dtbo 等）。
+
+**逻辑分区（system / vendor / odm / my_* 等，位于 `super` 内）不会被双槽刷写**，
+因为 `super` 是单个物理分区，两槽共用同一空间：
+
+```
+super 总容量      14.00 GB
+单槽逻辑分区需求   8.97 GB
+双槽合计          17.94 GB   ← 放不下
+```
+
+强行双槽会报 `Not enough space to resize partition`。
+Lrom 已在代码层面禁止该行为，并在预检阶段校验 `super` 空间。
 
 ## 预演检查是什么
 
