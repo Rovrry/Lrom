@@ -160,6 +160,8 @@ adb install -r root-work/KernelSU_*.apk
 
 来源可选 `ksu` / `ksu-next` / `sukisu` / `magisk`，始终取 GitHub 最新发布。
 
+完整实现说明见 **[docs/ROOT-IMPLEMENTATION.md](docs/ROOT-IMPLEMENTATION.md)**。
+
 失败可随时恢复，`lrom root` 会在刷写前把原厂镜像存到 `root-work/`：
 
 ```bash

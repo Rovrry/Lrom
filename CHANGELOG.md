@@ -2,6 +2,64 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.4.2] - 2026-10-27
+
+### 真机验证通过：OnePlus OPD2404 首次 root 成功
+
+2026-10-27 在真机上完整跑通了 `lrom root --method app` 全流程。
+
+| 步骤 | 结果 |
+|---|---|
+| 下载 KernelSU v3.3.1 APK（13.0 MB） | ✅ sha256 校验通过 |
+| `adb install` | ✅ |
+| 推送 `init_boot.img` 到 `/sdcard/Download/` | ✅ |
+| APP 内「Select a file」修补 | ✅ 产出 `kernelsu_patched_*.img` |
+| CPIO 内容检查 | ✅ `init`(603KB) + `init.real`(3MB) + `kernelsu.ko`(413KB) + `ksu_config` |
+| `verify_patched_image()` | ✅ PASS |
+| 刷入 `init_boot` | ✅ OKAY |
+| 重启 | ✅ 30 秒开机 |
+| 内核模块 | ✅ `/proc/modules`: `kernelsu 225280 ... Live (O)` |
+| KernelSU APP | ✅ **「工作中」LKM**，显示设备实际内核版本 |
+
+#### 修正此前的两个错误推断
+
+**① vermagic 不一致并不影响加载**
+
+patch 出来的 `kernelsu.ko` 的 vermagic 是 `6.1.166-dirty`，设备内核是
+`6.1.141` —— **不一致，但模块照样加载成功**。
+
+原因：该 `.ko` 与官方 `lkm-aarch64-android14-6.1_kernelsu.ko`
+**sha256 逐字节相同**（413296 字节）。KMI 兼容就够了，
+vermagic 里的 SubLevel 不参与判定。
+
+这推翻了 `DEVELOPER.md` 早期「vermagic 不匹配所以没生效」的推断
+—— 那次失败的真正原因是流程没走通，不是 vermagic。
+
+**② `su -c id` 从 adb shell 失败是正常现象**
+
+KernelSU 默认不授予 `shell` uid 的 root，需要在 APP「超级用户」里手动添加。
+**这不影响 root 是否存在**。验证应以模块加载 + APP 状态为准。
+
+#### 关于「APP 方式必须人工」的确认
+
+KernelSU Manager 的「Select a file」是纯 UI 交互，没有对外 API，
+也没有 exported Activity 能传参。用 `adb shell input tap` 按坐标点属于
+脆弱的黑盒 hack（分辨率/版本一变就废，误点有风险），违背「不砖机 > 功能多」。
+
+**结论：APP 方式必然有一步人工，这是 KernelSU 的设计决定的。**
+要全自动请用 `--method ksud`。
+
+### 新增文档：`docs/ROOT-IMPLEMENTATION.md`
+
+429 行，完整记录实现方法：
+- 为什么是这个方案（排除了什么）
+- 三个必须先搞对的前置知识（init_boot / KMI / AVB）
+- 三个模块的逐层设计
+- 三道安全闸
+- 真机验证记录与两个反直觉发现
+- 测试策略与 CLI 设计
+- 仍然存在的限制与后续建议
+
 ## [0.4.1] - 2026-10-27
 
 ### 新增：`lrom fetch-manager` —— 唯一的联网命令
