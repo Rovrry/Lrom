@@ -68,6 +68,7 @@ __all__ = [
     "flash_patched_image",
     "detect_fastboot_mode",
     "enter_fastbootd",
+    "ensure_fastboot",
     "ROOT_PARTITION_CANDIDATES",
 ]
 
@@ -102,6 +103,11 @@ class FlashMode(Enum):
 
 class RootError(Exception):
     """root 流程错误。"""
+
+
+#: 模式切换时的轮询间隔（秒）。测试里会临时改成 0，
+#: 避免测试真的等上几秒。
+_POLL_INTERVAL = 2.0
 
 
 # ---------------------------------------------------------------------------
@@ -579,6 +585,94 @@ def verify_patched_image(
     return (not problems), problems
 
 
+def ensure_fastboot(
+    *,
+    fastboot: FastbootRunner | None = None,
+    adb: AdbRunner | None = None,
+    timeout: float = 180.0,
+    on_notice=None,
+) -> tuple[bool, str]:
+    """确保设备处于 Fastboot（bootloader）模式。
+
+    **这是 v0.4.2 的一个严重疏漏**：`flash_patched_image()` 直接调
+    `fastboot flash`，但此时设备往往还在 ADB（开机）模式。fastboot
+    找不到设备，命令就会一直空等，表现为「刷入这步卡死」。
+
+    处理三种情况：
+      - 已在 fastboot     -> 直接继续
+      - 在 fastbootd      -> fastboot reboot bootloader
+      - 在 adb（开机）    -> adb reboot bootloader
+      - 什么都没检测到    -> 等待（用户可能正在手动进入）
+    """
+    fastboot = fastboot or FastbootRunner()
+
+    # 先看是不是已经在了
+    try:
+        if fastboot.devices():
+            if not fastboot.is_fastbootd():
+                return True, "已在 Fastboot 模式。"
+            # 在 fastbootd，回 bootloader
+            if on_notice:
+                on_notice("正在从 FastbootD 切回 bootloader…")
+            fastboot.run("reboot", "bootloader", timeout=60)
+            return _wait_for_fastboot(fastboot, timeout, on_notice)
+    except Exception:  # noqa: BLE001
+        pass
+
+    # 不在 fastboot，看是不是在 ADB
+    adb = adb or AdbRunner()
+    in_adb = False
+    try:
+        in_adb = any(st == "device" for st in adb.devices().values())
+    except Exception:  # noqa: BLE001
+        in_adb = False
+
+    if in_adb:
+        if on_notice:
+            on_notice("设备在 ADB 模式，正在重启到 bootloader…")
+        res = adb.run("reboot", "bootloader", timeout=60)
+        if res.exit_code != 0:
+            return False, (
+                "执行 `adb reboot bootloader` 失败："
+                f"{res.combined.strip()}\n"
+                "  可以手动进入：按住电源键选择「重启到 bootloader」，\n"
+                "  或用 adb reboot bootloader 后重试。"
+            )
+    elif on_notice:
+        on_notice("未检测到设备，等待其进入 Fastboot…")
+
+    return _wait_for_fastboot(fastboot, timeout, on_notice)
+
+
+def _wait_for_fastboot(
+    fastboot: FastbootRunner, timeout: float, on_notice=None
+) -> tuple[bool, str]:
+    """轮询等待设备进入 fastboot（非 fastbootd）。"""
+    start = time.time()
+    hinted = False
+    while time.time() - start < timeout:
+        time.sleep(_POLL_INTERVAL)
+        try:
+            if fastboot.devices():
+                if not fastboot.is_fastbootd():
+                    time.sleep(_POLL_INTERVAL)  # 给 bootloader 一点时间稳定
+                    return True, "已进入 Fastboot 模式。"
+        except Exception:  # noqa: BLE001
+            pass
+
+        if time.time() - start > 30 and not hinted and on_notice:
+            hinted = True
+            on_notice("仍在等待 Fastboot…如果手机停在某个界面，请手动选择 bootloader。")
+
+    return False, (
+        f"等待 Fastboot 超时（{int(timeout)} 秒）。\n"
+        "请检查：\n"
+        "  · 数据线是否正常\n"
+        "  · 手机屏幕是否停在 bootloader / 语言选择界面\n"
+        "  · 可手动执行 adb reboot bootloader 后重试"
+    )
+
+
 def flash_patched_image(
     *,
     image: Path,
@@ -597,10 +691,18 @@ def flash_patched_image(
     """
     fastboot = fastboot or FastbootRunner()
 
+    # ★ 先确保设备真的在目标模式，否则 fastboot flash 会空等
     if flash_mode is FlashMode.FASTBOOTD:
         ok, detail = enter_fastbootd(fastboot=fastboot, on_notice=on_notice)
         if not ok:
             return False, detail
+    else:
+        ok, detail = ensure_fastboot(fastboot=fastboot, on_notice=on_notice)
+        if not ok:
+            return False, detail
+
+    if on_notice:
+        on_notice(f"正在写入 {partition}…")
 
     res = fastboot.run("flash", partition, str(image), timeout=600)
     if not fastboot.ok(res):
@@ -662,12 +764,12 @@ def enter_fastbootd(
     start = time.time()
     hinted = False
     while time.time() - start < timeout:
-        time.sleep(3)
+        time.sleep(_POLL_INTERVAL)
         try:
             if not fastboot.devices():
                 continue
             if fastboot.is_fastbootd():
-                time.sleep(2)
+                time.sleep(_POLL_INTERVAL)
                 return True, "已进入 FastbootD 模式。"
         except Exception:  # noqa: BLE001
             pass

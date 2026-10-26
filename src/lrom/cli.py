@@ -457,6 +457,20 @@ def cmd_plan(args: argparse.Namespace) -> int:
 
     # 设备信息
     dev = detect(adb_server_port=args.adb_port)
+
+    # 预演阶段就检查 Bootloader 锁 —— 免得到真刷时才发现刷不了
+    if dev is not None:
+        if dev.locked is None:
+            print(
+                paint("  !! 无法确认 Bootloader 是否已解锁", C.YELLOW)
+            )
+        elif str(dev.locked) != "0":
+            print(paint("✗ Bootloader 未解锁，无法刷写", C.RED + C.BOLD))
+            print("  预演不通过：即使现在生成计划，真正刷写时也会被拒绝。")
+            return 1
+        else:
+            print(paint("  ✓ Bootloader 已解锁", C.GREEN))
+
     device_parts: set[str] = set()
     if dev and dev.mode is DeviceMode.ADB:
         findings = check_device_match(info, dev.codename or "", dev.model)
@@ -603,6 +617,35 @@ def cmd_flash(args: argparse.Namespace) -> int:
     if not dev:
         print(paint("✗ 未检测到设备", C.RED))
         return 1
+
+    # ---- 2.5) Bootloader 锁检查（必须在任何写操作之前）----
+    # 为什么必须查：锁定的设备刷写会失败在中途，或者只写进去一半，
+    # 比「提前拒绝」危险得多。另外用户在「临时 root」状态下
+    # （比如从 fastboot 临时启动而非持久刷入）容易误判自己已解锁。
+    if dev.locked is None:
+        print(
+            paint(
+                "  !! 无法确认 Bootloader 是否已解锁，继续但请自行确认。",
+                C.YELLOW,
+            )
+        )
+    elif str(dev.locked) != "0":
+        print(paint("✗ Bootloader 未解锁，拒绝刷写", C.RED + C.BOLD))
+        print()
+        print("  设备当前处于已锁定状态，无法写入任何分区。")
+        print()
+        print("  可能的原因：")
+        print("    · 从未执行过 OEM 解锁（开发者选项 → OEM 解锁）")
+        print("    · 执行过但未完成 fastboot oem unlock 流程")
+        print("    · 使用了「临时 root」（fastboot boot）但未持久化，")
+        print("      这种状态下重启后锁会恢复，并不是真正的解锁")
+        print()
+        print("  请先在设备上完成解锁，再重试本命令。")
+        print("  注意：解锁会清空全部用户数据。")
+        print()
+        return 1
+    else:
+        print(paint("  ✓ Bootloader 已解锁", C.GREEN))
 
     device_parts: set[str] = set()
     if dev.mode is DeviceMode.ADB:
@@ -1081,9 +1124,22 @@ def cmd_root(args: argparse.Namespace) -> int:
         print()
         return 1
 
-    if device.locked is not None and str(device.locked) != "0":
+    if device.locked is None:
+        print(
+            paint(
+                "  ⚠ 无法确认 Bootloader 是否已解锁，请自行确认。",
+                C.YELLOW,
+            )
+        )
+        print()
+    elif str(device.locked) != "0":
         print(paint("  ⛔ Bootloader 未解锁，无法刷写。", C.RED))
-        print("  请先在开发者选项里执行 OEM 解锁。")
+        print()
+        print("  可能的原因：")
+        print("    · 从未执行过 OEM 解锁（开发者选项 → OEM 解锁）")
+        print("    · 使用了「临时 root」（fastboot boot）但未持久化")
+        print()
+        print("  注意：解锁会清空全部用户数据。")
         print()
         return 1
 
@@ -1219,6 +1275,10 @@ def cmd_root(args: argparse.Namespace) -> int:
     # --- 步骤 4：刷写 ---
     print()
     print(paint("  [4/5] 刷入…", C.CYAN))
+    if plan.flash_mode.value == "fastboot":
+        print(paint("        会先把设备切到 Fastboot 模式", C.DIM))
+    else:
+        print(paint("        会先把设备切到 FastbootD 模式", C.DIM))
     ok, detail = rt.flash_patched_image(
         image=patched,
         partition=plan.partition,
@@ -1230,7 +1290,7 @@ def cmd_root(args: argparse.Namespace) -> int:
         print(paint("  ⛔ 刷写失败：", C.RED))
         print(f"    {detail}")
         print()
-        print("  原厂镜像已保存在：")
+        print(f"  原厂镜像已保存在：")
         print(f"    {stock_copy}")
         print()
         print("  可以这样恢复：")

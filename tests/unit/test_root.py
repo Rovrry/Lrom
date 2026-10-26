@@ -421,3 +421,244 @@ def test_enter_fastbootd_no_device_gives_ocdt_hint():
     ok, msg = enter_fastbootd(fastboot=fb, timeout=5)
     assert ok is False
     assert "adb reboot fastboot" in msg
+
+
+# ---------------------------------------------------------------------------
+# 模式切换：flash 前必须先把设备切到 fastboot（v0.4.4 修复）
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _no_poll_delay(monkeypatch):
+    """把模式切换的轮询间隔设为 0，测试不要真等。"""
+    import lrom.core.root as root_mod
+
+    monkeypatch.setattr(root_mod, "_POLL_INTERVAL", 0.0)
+
+
+class FakeAdb:
+    def __init__(self, *, in_adb=True, reboot_ok=True):
+        self._in_adb = in_adb
+        self._reboot_ok = reboot_ok
+        self.calls = []
+
+    def devices(self):
+        return {"serial1": "device"} if self._in_adb else {}
+
+    def run(self, *args, timeout=None):
+        self.calls.append(args)
+
+        class R:
+            exit_code = 0 if self._reboot_ok else 1
+            timed_out = False
+            stdout = ""
+            stderr = "" if self._reboot_ok else "boom"
+            combined = "OKAY" if self._reboot_ok else "error: boom"
+
+        if args[:2] == ("reboot", "bootloader") and self._reboot_ok:
+            self._in_adb = False
+        return R()
+
+
+def test_ensure_fastboot_from_adb_reboots():
+    """设备在 ADB 模式时必须 adb reboot bootloader，否则 fastboot flash 会空等。
+
+    这是 v0.4.2 的真实 bug：用户跑到第 4 步「刷入」时卡死，
+    因为设备还在 ADB 模式，fastboot 找不到设备。
+    """
+    from lrom.core.root import ensure_fastboot
+
+    fb = FakeFastboot(devices=True, is_user_space=False)
+    # 一开始不在 bootloader，reboot 后才在
+    fb._devices = False
+    adb = FakeAdb(in_adb=True)
+
+    # adb reboot bootloader 成功后设备才出现在 fastboot
+    def adb_run_side_effect(*args, timeout=None):
+        if args[:2] == ("reboot", "bootloader"):
+            fb._devices = True
+        return FakeAdb.run(adb, *args, timeout=timeout)
+
+    adb.run = adb_run_side_effect
+
+    ok, msg = ensure_fastboot(fastboot=fb, adb=adb, timeout=10)
+    assert ok is True
+    assert any(c[:2] == ("reboot", "bootloader") for c in adb.calls)
+
+
+def test_ensure_fastboot_already_in_fastboot_no_reboot():
+    from lrom.core.root import ensure_fastboot
+
+    fb = FakeFastboot(devices=True, is_user_space=False)
+    adb = FakeAdb(in_adb=False)
+
+    ok, msg = ensure_fastboot(fastboot=fb, adb=adb, timeout=5)
+    assert ok is True
+    assert "已在" in msg
+    assert adb.calls == []
+
+
+def test_ensure_fastboot_from_fastbootd_goes_to_bootloader():
+    from lrom.core.root import ensure_fastboot
+
+    fb = FakeFastboot(devices=True, is_user_space=True)
+    adb = FakeAdb(in_adb=False)
+
+    def run_side_effect(*args, timeout=None):
+        if args[:2] == ("reboot", "bootloader"):
+            fb._is_user_space = False
+        return FakeFastboot.run(fb, *args, timeout=timeout)
+
+    fb.run = run_side_effect
+
+    ok, msg = ensure_fastboot(fastboot=fb, adb=adb, timeout=10)
+    assert ok is True
+
+
+def test_ensure_fastboot_adb_reboot_failure_reports():
+    from lrom.core.root import ensure_fastboot
+
+    fb = FakeFastboot(devices=False, is_user_space=False)
+    adb = FakeAdb(in_adb=True, reboot_ok=False)
+
+    ok, msg = ensure_fastboot(fastboot=fb, adb=adb, timeout=3)
+    assert ok is False
+    assert "adb reboot bootloader" in msg
+
+
+def test_ensure_fastboot_timeout_gives_guidance():
+    from lrom.core.root import ensure_fastboot
+
+    fb = FakeFastboot(devices=False, is_user_space=False)
+    adb = FakeAdb(in_adb=False)
+
+    ok, msg = ensure_fastboot(fastboot=fb, adb=adb, timeout=3)
+    assert ok is False
+    assert "超时" in msg
+
+
+def test_flash_calls_ensure_fastboot_first():
+    """flash_patched_image 必须先切模式，再 flash。
+
+    这条是防回归：确保不会退回到「直接 fastboot flash」的老行为。
+    """
+    from lrom.core.root import FlashMode, flash_patched_image
+
+    order = []
+
+    class RecordingFastboot:
+        def __init__(self):
+            self._devices = False
+
+        def devices(self):
+            return ["s"] if self._devices else []
+
+        def is_fastbootd(self):
+            return False
+
+        def run(self, *args, timeout=None):
+            order.append(args)
+            if args[:2] == ("reboot", "bootloader"):
+                self._devices = True
+
+            class R:
+                exit_code = 0
+                timed_out = False
+                stdout = ""
+                stderr = ""
+                combined = "OKAY"
+
+            return R()
+
+        def ok(self, result):
+            return True
+
+    fb = RecordingFastboot()
+    fb._devices = False  # 初始不在 fastboot，模拟真实卡死场景
+    adb = FakeAdb(in_adb=True)
+
+    # adb reboot bootloader 后设备才出现在 fastboot
+    def adb_run_side_effect(*args, timeout=None):
+        if args[:2] == ("reboot", "bootloader"):
+            fb._devices = True
+        return FakeAdb.run(adb, *args, timeout=timeout)
+
+    adb.run = adb_run_side_effect
+
+    import lrom.core.root as root_mod
+
+    orig = root_mod.AdbRunner
+    root_mod.AdbRunner = lambda *a, **k: adb
+    try:
+        ok, detail = flash_patched_image(
+            image=Path("/tmp/x.img"),
+            partition="init_boot",
+            fastboot=fb,
+            flash_mode=FlashMode.FASTBOOT,
+        )
+    finally:
+        root_mod.AdbRunner = orig
+
+    assert ok is True
+    # 关键断言：必须先通过 adb 切到 bootloader，之后才有 flash
+    assert any(c[:2] == ("reboot", "bootloader") for c in adb.calls), (
+        "flash 之前必须先 adb reboot bootloader，否则设备还在系统里，"
+        "fastboot flash 会空等（v0.4.2 的卡死 bug）"
+    )
+    assert ("flash", "init_boot", "/tmp/x.img") in order
+
+
+# ---------------------------------------------------------------------------
+# Bootloader 锁检测（v0.4.4）
+# ---------------------------------------------------------------------------
+
+
+def test_read_fastboot_unlocked_yes():
+    from lrom.device.discover import _read_fastboot_unlocked
+
+    class FB:
+        def getvar(self, name):
+            return "yes"
+
+    assert _read_fastboot_unlocked(FB()) is True
+
+
+@pytest.mark.parametrize("value", ["no", "NO", "false", "0", "locked"])
+def test_read_fastboot_unlocked_no(value):
+    from lrom.device.discover import _read_fastboot_unlocked
+
+    class FB:
+        def getvar(self, name):
+            return value
+
+    assert _read_fastboot_unlocked(FB()) is False
+
+
+def test_read_fastboot_unlocked_unknown():
+    from lrom.device.discover import _read_fastboot_unlocked
+
+    class FB:
+        def getvar(self, name):
+            return None
+
+    assert _read_fastboot_unlocked(FB()) is None
+
+
+def test_read_fastboot_unlocked_handles_exception():
+    from lrom.device.discover import _read_fastboot_unlocked
+
+    class FB:
+        def getvar(self, name):
+            raise RuntimeError("boom")
+
+    assert _read_fastboot_unlocked(FB()) is None
+
+
+def test_read_fastboot_unlocked_garbage():
+    from lrom.device.discover import _read_fastboot_unlocked
+
+    class FB:
+        def getvar(self, name):
+            return "maybe"
+
+    assert _read_fastboot_unlocked(FB()) is None

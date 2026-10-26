@@ -856,8 +856,6 @@ def _menu_root_rollback(sess: "Session", mon) -> None:
     """菜单 9：回滚 Root（刷回原厂 init_boot）。"""
     from pathlib import Path
 
-    from ..device.runner import FastbootRunner
-
     print()
     print(f"  {_color('回滚 Root', C.BOLD)}")
     print()
@@ -891,28 +889,27 @@ def _menu_root_rollback(sess: "Session", mon) -> None:
     print()
     print("  注意：")
     print("    · 刷回后 root 会消失")
-    print("    · 设备需要先进入 fastboot 模式")
+    print("    · 会自动把设备切到 fastboot 模式")
     print()
     if not confirm("确认回滚？"):
         print("  已取消。")
         pause()
         return
 
-    fb = FastbootRunner()
-    if not fb.devices():
-        print()
-        print(f"  {_color('未检测到 fastboot 设备。', C.YELLOW)}")
-        print("  请先让设备进入 fastboot：")
-        print(f"    {_color('adb reboot bootloader', C.CYAN)}")
-        pause()
-        return
+    # 自动切换模式：设备可能还在 ADB，直接 flash 会空等
+    from ..core.root import FlashMode, flash_patched_image
 
     print()
     print("  正在刷写…")
-    res = fb.run("flash", "init_boot", str(target), timeout=300)
-    if not fb.ok(res):
+    ok, detail = flash_patched_image(
+        image=target,
+        partition="init_boot",
+        flash_mode=FlashMode.FASTBOOT,
+        on_notice=lambda msg: print(f"    {_color(msg, C.YELLOW)}"),
+    )
+    if not ok:
         print(f"  {_color('刷写失败：', C.RED)}")
-        print(f"    {res.combined.strip()}")
+        print(f"    {detail}")
         pause()
         return
 

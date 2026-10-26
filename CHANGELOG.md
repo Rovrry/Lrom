@@ -2,6 +2,86 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.4.4] - 2026-10-27
+
+### 修复：刷入卡死（设备不会自动进入 fastboot）
+
+**现象**：跑到 `[4/5] 刷入` 这一步就卡住不动，设备停在系统里没有进 fastboot。
+
+**原因**：`flash_patched_image()` 直接调 `fastboot flash`，
+但此时设备往往还在 ADB（开机）模式。fastboot 找不到设备就无限空等。
+
+而 `core/flash.py` 里早就有成熟的 `_ensure_fastboot()` 做这件事
+（处理 adb / fastboot / fastbootd 三种状态），我写 root 时另写了一套也没接上。
+**这是继 v0.4.3「菜单漏接入口」之后，第二类「有现成能力却没复用」的错误。**
+
+**修复**：新增 `root.ensure_fastboot()`：
+
+| 设备状态 | 动作 |
+|---|---|
+| 已在 fastboot | 直接继续 |
+| 在 fastbootd | `fastboot reboot bootloader` |
+| 在 ADB（开机） | `adb reboot bootloader` ← 之前缺这一步 |
+| 未检测到 | 提示 + 等待，超时给排查指引 |
+
+刷写步骤现在会先打印模式切换提示，过程中也能看到
+「设备在 ADB 模式，正在重启到 bootloader…」。
+
+**真机验证**（OnePlus OPD2404）：
+```
+>> 设备在 ADB 模式，正在重启到 bootloader…
+>> 正在写入 init_boot…
+结果: True | 刷写完成
+```
+
+### 修复：回滚 Root 不会自动进入 fastboot
+
+菜单 9「回滚 Root」原本是 `if not fb.devices(): 提示手动进入`，
+设备在 ADB 模式时直接放弃。改为复用 `flash_patched_image()`，
+自动切模式后刷写。
+
+**真机验证**：ADB 模式下执行回滚 → 自动切 fastboot → 刷回原厂 →
+重启后 `kernelsu` 模块消失，root 已移除 ✅
+
+### 新增：刷 ROM 前检查 Bootloader 锁
+
+用户提出：防止在「临时 root」状态下误刷。
+
+**为什么必要**：锁定的设备刷写会失败在中途或只写进去一半，
+比「提前拒绝」危险得多。而「临时 root」（`fastboot boot` 临时启动
+而非持久刷入）容易让人误以为已解锁。
+
+**`lrom flash`**：在设备探测后、生成计划前检查，未解锁直接拒绝并说明原因。
+
+**`lrom plan`**：预演阶段也检查 —— 否则预演通过、真刷才失败，白跑一趟。
+
+**`lrom root`**：原来只在 ADB 模式检查（fastboot 下 `locked` 是 None 就跳过），
+现在补上明确的「无法确认」提示。
+
+### 修复：fastboot 模式下读不到解锁状态
+
+`discover.detect()` 在 fastboot 模式下根本没读锁状态，
+只有 ADB 模式读 `ro.boot.flash.locked`。但真正刷机时设备往往已经在 fastboot 里。
+
+新增 `_read_fastboot_unlocked()`，用 `getvar unlocked`（返回 `yes`/`no`），
+统一成与 ADB 相同的 `"0"`=已解锁 / `"1"`=已锁定 语义。
+
+**真机验证**：fastboot 下 `detect()` 正确返回 `locked='0'`，
+`describe()` 显示「Bootloader: 已解锁」。
+
+### 顺带：测试性能
+
+新增的模式切换测试会让 `_wait_for_fastboot` 里的 `sleep(2)` 真实执行，
+导致整套测试从 10 秒涨到 60+ 秒。
+把轮询间隔抽成模块级 `_POLL_INTERVAL`，加 autouse fixture 在测试里设为 0，
+恢复到 **8.7 秒**。
+
+### 测试
+
+203 → **212**（新增 9 个）：
+- 模式切换 6 个（含防回归 `test_flash_calls_ensure_fastboot_first`）
+- Bootloader 锁检测 4 个
+
 ## [0.4.3] - 2026-10-27
 
 ### 修复：交互菜单里没有 Root 入口

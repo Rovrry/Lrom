@@ -85,11 +85,40 @@ def detect(*, adb_server_port: int | None = None) -> Device | None:
         for var in ("variant", "partition-type:boot"):
             pass
         dev.slot = _normalize_slot(fb.getvar("current-slot"))
+        # fastboot 下读解锁状态：getvar unlocked 返回 yes/no。
+        # 注意这不是 ro.boot.flash.locked（那是 ADB 下的属性），
+        # 两者的语义要统一成 "0" = 已解锁 / "1" = 已锁定。
+        unlocked = _read_fastboot_unlocked(fb)
+        if unlocked is not None:
+            dev.locked = "0" if unlocked else "1"
         # fastboot 下没有 ro.product.model，用 serialno/产品信息补齐
         dev.model = None
         dev.serial = serial
         return dev
 
+    return None
+
+
+def _read_fastboot_unlocked(fb: FastbootRunner) -> bool | None:
+    """在 fastboot 模式下读取 bootloader 解锁状态。
+
+    返回 True=已解锁 / False=已锁定 / None=无法判断。
+
+    为什么需要这个：`ro.boot.flash.locked` 只有 ADB（开机）模式才读得到，
+    而真正要刷机时设备往往已经在 fastboot 里了。如果此时不做检查，
+    锁定的设备会刷到一半才失败，或者出现更难处理的半刷状态。
+    """
+    try:
+        raw = fb.getvar("unlocked")
+    except Exception:  # noqa: BLE001
+        return None
+    if not raw:
+        return None
+    v = raw.strip().lower()
+    if v in ("yes", "true", "1", "unlocked"):
+        return True
+    if v in ("no", "false", "0", "locked"):
+        return False
     return None
 
 
