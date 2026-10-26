@@ -213,6 +213,11 @@ def build_parser() -> argparse.ArgumentParser:
     pf.add_argument("--partitions", nargs="+", default=None, help="只刷指定分区")
     pf.add_argument("--allow-dangerous", action="store_true", help="允许写危险分区")
     pf.add_argument("--no-reboot", action="store_true", help="刷完不重启")
+    pf.add_argument(
+        "--wipe",
+        action="store_true",
+        help="清空用户数据（恢复出厂设置，降级/救砖时使用）",
+    )
     pf.add_argument("--adb-port", type=int, default=None, help="adb server 端口")
     pf.set_defaults(func=cmd_flash)
 
@@ -527,6 +532,10 @@ def cmd_flash(args: argparse.Namespace) -> int:
     print(f"│ 阶段一 : {paint(f'Fastboot  {len(fb_ops)} 个分区', C.CYAN)}")
     print(f"│ 阶段二 : {paint(f'FastbootD {len(fbd_ops)} 个分区', C.CYAN)}")
     print(f"│ 总量   : {plan.total_bytes / 2**30:.2f} GB")
+    if getattr(args, "wipe", False):
+        print(f"│ 数据   : {paint('将清空（恢复出厂设置）', C.RED)}")
+    else:
+        print(f"│ 数据   : 保留")
     print(paint("╰" + "─" * 56, C.BOLD))
 
     for i in issues:
@@ -537,6 +546,10 @@ def cmd_flash(args: argparse.Namespace) -> int:
     if not dry_run and not args.yes:
         print()
         print(paint("⚠️  这将实际写入设备，可能变砖。", C.RED + C.BOLD))
+        if getattr(args, "wipe", False):
+            print(paint("    数据策略：将清空所有用户数据！", C.RED + C.BOLD))
+        else:
+            print("    数据策略：保留用户数据（升级模式）")
         print("    请确认：电量 > 50%、数据线稳定、不要中途拔线。")
         print()
         try:
@@ -570,6 +583,7 @@ def cmd_flash(args: argparse.Namespace) -> int:
     executor = FlashExecutor(
         plan, image_dir, fb=fb, adb=adb, dry_run=dry_run,
         on_mode_change=on_mode_change,
+        wipe_data=getattr(args, "wipe", False),
     )
 
     print()

@@ -273,3 +273,48 @@ def test_locked_partition_counts_in_summary(tmp_path):
     ]
     text = summarize(r)
     assert "锁定: 1" in text
+
+
+# -- 数据擦除 -----------------------------------------------------------
+
+def test_wipe_disabled_by_default(tmp_path):
+    plan = make_plan(tmp_path, with_logical=False)
+    fb = FakeFastboot()
+    ex = make_executor(plan, tmp_path, fb)
+    ex.run()
+
+    assert not [c for c in fb.calls if c and c[0] == "-w"]
+
+
+def test_wipe_runs_after_all_flashes(tmp_path):
+    plan = make_plan(tmp_path, with_logical=False)
+    fb = FakeFastboot()
+    ex = make_executor(plan, tmp_path, fb)
+    ex.wipe_data = True
+    ex.run()
+
+    calls = [c[0] for c in fb.calls if c]
+    assert "-w" in calls
+    # 擦除必须在最后一次 flash 之后
+    assert calls.index("-w") > max(i for i, c in enumerate(calls) if c == "flash")
+
+
+def test_wipe_failure_reported(tmp_path):
+    plan = make_plan(tmp_path, with_logical=False)
+    fb = FakeFastboot()
+
+    original_run = fb.run
+
+    def failing_wipe(*args, timeout=None):
+        if args and args[0] == "-w":
+            fb.calls.append(list(args))
+            return RunResult(argv=list(args), exit_code=1, stderr="FAILED (remote: 'busy')")
+        return original_run(*args, timeout=timeout)
+
+    fb.run = failing_wipe
+    ex = make_executor(plan, tmp_path, fb)
+    ex.wipe_data = True
+    result = ex.run()
+
+    assert not result.ok
+    assert "清空用户数据失败" in result.error

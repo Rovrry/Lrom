@@ -179,6 +179,7 @@ class FlashExecutor:
         on_step: Callable[[StepResult], None] | None = None,
         on_progress: Callable[[str, int, int], None] | None = None,
         on_mode_change: Callable[[Phase], None] | None = None,
+        wipe_data: bool = False,
     ) -> None:
         self.plan = plan
         self.image_dir = image_dir
@@ -188,6 +189,7 @@ class FlashExecutor:
         self.on_step = on_step
         self.on_progress = on_progress
         self.on_mode_change = on_mode_change
+        self.wipe_data = wipe_data
         self.result = FlashResult(plan=plan)
         self._stop = False
 
@@ -309,8 +311,25 @@ class FlashExecutor:
                     self.result.error = "FastbootD 阶段失败，已中止"
                 return self.result
 
+        # ---- 可选：清空用户数据 ----
+        if self.wipe_data and not self.dry_run:
+            if not self._wipe_userdata():
+                self.result.error = "清空用户数据失败，已中止"
+                self.result.finished_at = time.time()
+                return self.result
+
         self.result.finished_at = time.time()
         return self.result
+
+    def _wipe_userdata(self) -> bool:
+        """清空用户数据（等同恢复出厂设置）。
+
+        fastboot -w 会擦除 userdata / metadata / cache。
+        必须在刷完所有分区之后执行。
+        """
+        assert self.fb is not None
+        res = self.fb.run("-w", timeout=1800)
+        return self.fb.ok(res)
 
     def _notify_mode(self, phase: Phase) -> None:
         """通知上层当前进入哪个阶段（用于打印分隔）。"""
