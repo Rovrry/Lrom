@@ -60,6 +60,22 @@ def save_config(config: dict) -> None:
     )
 
 
+def tool_env(name: str) -> dict[str, str]:
+    """返回该工具需要的额外环境变量（如非标准安装的 LD_LIBRARY_PATH）。
+
+    配置示例：
+        {"tools": {"adb": "/opt/pt/adb"},
+         "tool_env": {"adb": {"LD_LIBRARY_PATH": "/opt/pt/lib"}}}
+    """
+    return dict(load_config().get("tool_env", {}).get(name, {}))
+
+
+def default_adb_port() -> int | None:
+    """配置里指定的 adb server 端口（可避免与系统 adb 版本冲突）。"""
+    port = load_config().get("adb_server_port")
+    return int(port) if port else None
+
+
 def find_tool(name: str) -> str:
     """查找外部工具的可执行文件路径。"""
     env_key = f"LROM_{name.upper()}"

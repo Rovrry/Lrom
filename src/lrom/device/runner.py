@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable
 
-from .tools import ToolNotFoundError, find_tool
+from .tools import ToolNotFoundError, find_tool, tool_env
 
 __all__ = [
     "ToolNotFoundError",
@@ -70,6 +70,10 @@ def run(
     argv = list(argv)
 
     proc_env = os.environ.copy()
+    # 工具专属环境变量（如非标准安装的 adb 需要 LD_LIBRARY_PATH）
+    if argv:
+        tool_name = os.path.basename(argv[0])
+        proc_env.update(tool_env(tool_name))
     if env:
         proc_env.update(env)
     # 统一 UTF-8，避免编码不一致导致乱码
@@ -220,6 +224,10 @@ class AdbRunner:
         self.serial = serial
         self.on_line = on_line
         self.env = {}
+        if server_port is None:
+            from .tools import default_adb_port
+
+            server_port = default_adb_port()
         if server_port:
             self.env["ANDROID_ADB_SERVER_PORT"] = str(server_port)
 
