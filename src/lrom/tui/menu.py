@@ -40,14 +40,13 @@ def _color(s: str, c: str) -> str:
 # ---------------------------------------------------------------------------
 
 class Session:
-    """菜单会话状态，记住用户选过的包与目录。"""
+    """菜单会话状态。"""
 
     def __init__(self) -> None:
         from ..device.tools import load_config
 
         self.package: Path | None = None
         self.work_dir: Path = Path("work")
-        self.device_desc: str = "检测中…"
 
         cfg = load_config()
         if wd := cfg.get("work_dir"):
@@ -58,20 +57,19 @@ class Session:
 
     @property
     def image_dir(self) -> Path | None:
-        """解包产物目录。自动在几个常见位置查找已解包的镜像。"""
+        """解包产物目录。自动在几个常见位置查找。"""
         if not self.package:
             return None
         stem = self.package.stem
-        candidates = [
-            self.work_dir / stem,
-            Path("unpacked") / stem,
-            Path("work") / stem,
-        ]
-        for c in candidates:
+        for c in (self.work_dir / stem, Path("unpacked") / stem):
             if c.exists() and any(c.glob("*.img")):
                 return c
-        # 都不存在时返回默认位置（用于新建）
         return self.work_dir / stem
+
+    @property
+    def unpacked(self) -> bool:
+        d = self.image_dir
+        return bool(d and d.exists() and any(d.glob("*.img")))
 
     def save_state(self) -> None:
         from ..device.tools import load_config, save_config
@@ -87,76 +85,34 @@ class Session:
 
 
 # ---------------------------------------------------------------------------
-# 输入辅助
-# ---------------------------------------------------------------------------
-
-def ask(prompt: str, default: str = "") -> str:
-    suffix = f" [{default}]" if default else ""
-    try:
-        val = input(f"  {prompt}{suffix}: ").strip()
-    except (EOFError, KeyboardInterrupt):
-        print()
-        raise SystemExit(0)
-    return val or default
-
-
-def ask_path(prompt: str, default: str = "") -> Path | None:
-    raw = ask(prompt, default)
-    if not raw:
-        return None
-    raw = raw.strip().strip("'\"").replace("\\ ", " ")
-    return Path(os.path.expanduser(raw))
-
-
-def confirm(prompt: str, word: str | None = None) -> bool:
-    """确认。word 非空时必须完整输入该词。"""
-    if word:
-        print()
-        print(_color(f"  ⚠  {prompt}", C.RED + C.BOLD))
-        print(f"  输入 {_color(word, C.BOLD)} 确认，其他任意输入取消: ", end="")
-        try:
-            return input().strip() == word
-        except (EOFError, KeyboardInterrupt):
-            print()
-            return False
-    return ask(f"{prompt} (y/N)", "n").lower().startswith("y")
-
-
-def pause(msg: str = "按回车返回菜单…") -> None:
-    try:
-        input(f"\n  {_color(msg, C.DIM)}")
-    except (EOFError, KeyboardInterrupt):
-        print()
-        raise SystemExit(0)
-
-
-# ---------------------------------------------------------------------------
 # 头部
 # ---------------------------------------------------------------------------
 
-MENU = f"""
-  {_color('─ 包处理 ──────────────────────────────────────', C.DIM)}
-   {_color('1', C.CYAN)}) 解全量包          把 ROM 包解出分区镜像
-   {_color('2', C.CYAN)}) 分析 ROM 包       判断能否线刷、查看分区
-   {_color('3', C.CYAN)}) 选择 ROM 包       指定要操作的包
-
-  {_color('─ 刷写 ────────────────────────────────────────', C.DIM)}
-   {_color('4', C.CYAN)}) 预演检查          ★ 强烈建议先做（不写设备）
-   {_color('5', C.CYAN)}) 线刷全量包        真正写入设备（需确认）
-   {_color('6', C.CYAN)}) 只刷指定分区      手动选择分区
-
-  {_color('─ 安全 ────────────────────────────────────────', C.DIM)}
-   {_color('7', C.CYAN)}) 备份设备分区      刷前备份（需 root）
-   {_color('8', C.CYAN)}) ARB 熔断检测      防降级硬砖
-
-  {_color('─ 工具 ────────────────────────────────────────', C.DIM)}
-   {_color('9', C.CYAN)}) 设备信息          型号 / 版本 / 槽位
-  {_color('10', C.CYAN)}) 重启设备          到 Fastboot / FastbootD / 系统
-  {_color('11', C.CYAN)}) 环境自检          adb / 权限 / udev
-  {_color('12', C.CYAN)}) 关于
-
-   {_color('0', C.CYAN)}) 退出
-"""
+def build_menu(sess: "Session", env_ok: bool) -> str:
+    d = C.DIM
+    lines = [
+        f"  {_color('─ 刷写流程 ────────────────────────────────────', d)}",
+        f"   {_color('1', C.CYAN)}) 解全量包          选择 ROM 包并解出镜像",
+        f"   {_color('2', C.CYAN)}) 预演检查          ★ 不写设备，先看能不能刷",
+        f"   {_color('3', C.CYAN)}) 线刷全量包        真正写入设备（需确认）",
+        f"   {_color('4', C.CYAN)}) 只刷指定分区      手动选择分区",
+        "",
+        f"  {_color('─ 安全 ────────────────────────────────────────', d)}",
+        f"   {_color('5', C.CYAN)}) 备份设备分区      刷前备份（需 root）",
+        f"   {_color('6', C.CYAN)}) ARB 熔断检测      防降级硬砖",
+        "",
+        f"  {_color('─ 工具 ────────────────────────────────────────', d)}",
+        f"   {_color('7', C.CYAN)}) 设备信息          型号 / 版本 / 分区",
+        f"   {_color('8', C.CYAN)}) 重启设备          到 Fastboot / FastbootD / 系统",
+        f"   {_color('9', C.CYAN)}) 环境自检          重新检查 adb / udev / 权限",
+        f"  {_color('10', C.CYAN)}) 关于",
+        "",
+        f"   {_color('0', C.CYAN)}) 退出",
+    ]
+    if not env_ok:
+        lines.insert(0, f"   {_color('! 环境未通过检测，设备功能可能不可用', C.RED)}")
+        lines.insert(1, "")
+    return "\n".join(lines)
 
 
 def _clear_screen() -> None:
@@ -172,7 +128,7 @@ def _clear_screen() -> None:
     sys.stdout.flush()
 
 
-def print_header(sess: Session) -> None:
+def print_header(sess: Session, mon=None) -> None:
     _clear_screen()
     print()
     print(_color("  ┌" + "─" * 58 + "┐", C.MAGENTA))
@@ -185,164 +141,284 @@ def print_header(sess: Session) -> None:
     print(_color("  └" + "─" * 58 + "┘", C.MAGENTA))
     print()
 
-    pkg = _color(sess.package.name, C.CYAN) if sess.package else _color("未选择", C.DIM)
-    print(f"    设备    : {sess.device_desc}")
-    print(f"    ROM 包  : {pkg}")
-    img_dir = sess.image_dir
-    if img_dir and img_dir.exists():
-        n = len(list(img_dir.glob("*.img")))
-        if n:
-            print(f"    已解包  : {_color(str(img_dir), C.CYAN)}  ({n} 个镜像)")
+    snap = mon.snapshot if mon else None
+    if snap and snap.present:
+        label, color = MODE_LABEL.get(snap.mode, (snap.mode, C.GREEN))
+        info = snap.model or snap.codename or "未知型号"
+        line = (
+            f"  {_color('●', color)} 设备    : "
+            f"{_color(info, C.BOLD)}  {_color('[' + label + ']', color)}"
+        )
+        if snap.slot:
+            line += f"  槽位 _{snap.slot}"
+        print(line)
+        if snap.build_id:
+            print(f"              {_color(snap.build_id, C.DIM)}")
+    else:
+        print(f"  {_color('○', C.RED)} 设备    : {_color('未连接', C.RED)}")
+        print(f"              {_color('请检查数据线与 USB 调试', C.DIM)}")
+
+    print()
+    if sess.package:
+        mark = _color("✓", C.GREEN) if sess.unpacked else _color("·", C.DIM)
+        print(f"    ROM 包  : {_color(sess.package.name, C.CYAN)}")
+        if sess.unpacked:
+            n = len(list(sess.image_dir.glob("*.img")))
+            print(f"    {mark} 已解包  : {n} 个镜像")
+        else:
+            print(f"    {mark} 已解包  : {_color('尚未解包', C.DIM)}")
+    else:
+        print(f"    ROM 包  : {_color('未选择', C.DIM)}")
     print()
 
 
-def refresh_device(sess: Session) -> None:
-    from ..device.discover import detect
-
-    try:
-        dev = detect()
-    except Exception:
-        dev = None
-    if not dev:
-        sess.device_desc = _color("未检测到设备", C.DIM)
-        return
-    model = dev.model or dev.codename or "未知"
-    sess.device_desc = (
-        f"{_color('●', C.GREEN)} {model}  {dev.mode.value}"
-        f"  槽位 _{dev.slot or '?'}"
-    )
+MODE_LABEL = {
+    "adb": ("ADB", C.GREEN),
+    "fastboot": ("Fastboot", C.CYAN),
+    "fastbootd": ("FastbootD", C.CYAN),
+    "unauthorized": ("未授权", C.YELLOW),
+    "": ("未连接", C.RED),
+}
 
 
 # ---------------------------------------------------------------------------
 # 入口
 # ---------------------------------------------------------------------------
 
+def startup_env_check() -> bool:
+    """启动时的环境检测（阻塞）。返回 True 表示环境可用。"""
+    from ..device.selfcheck import Level, run_selfcheck
+
+    _clear_screen()
+    print()
+    print(_color("  ┌" + "─" * 58 + "┐", C.MAGENTA))
+    print(
+        _color("  │ ", C.MAGENTA)
+        + _color("Lrom", C.BOLD + C.MAGENTA)
+        + "  ·  Linux Android 刷机工具"
+        + _color(f"  v{__version__}", C.DIM)
+    )
+    print(_color("  └" + "─" * 58 + "┘", C.MAGENTA))
+    print()
+    print(_color("  第一步：检测系统环境", C.BOLD))
+    print()
+
+    items = run_selfcheck()
+    marks = {
+        Level.OK: ("✓", C.GREEN),
+        Level.WARN: ("!", C.YELLOW),
+        Level.ERROR: ("✗", C.RED),
+        Level.INFO: ("·", C.BLUE),
+    }
+    errors, warns = [], []
+    for it in items:
+        mark, color = marks[it.level]
+        print(f"  {_color(mark, color)} {it.title}")
+        if it.level is Level.ERROR:
+            errors.append(it)
+        elif it.level is Level.WARN:
+            warns.append(it)
+    print()
+
+    if errors:
+        print(_color(f"  发现 {len(errors)} 个必须解决的问题：", C.RED + C.BOLD))
+        print()
+        for it in errors:
+            print(_color(f"  ✗ {it.title}", C.RED + C.BOLD))
+            if it.detail:
+                for ln in it.detail.splitlines():
+                    print(f"      {ln}")
+            if it.fix:
+                print(_color("    修复方法：", C.CYAN))
+                for ln in it.fix.splitlines():
+                    print(f"      {ln}")
+            print()
+        print(_color("  环境不满足要求，设备相关功能无法使用。", C.RED))
+        print()
+        ans = ask("(r) 修复后重新检测 / (c) 继续（仅离线功能）/ (q) 退出", "r")
+        low = ans.lower()
+        if low.startswith("q"):
+            raise SystemExit(0)
+        if low.startswith("r"):
+            return startup_env_check()
+        return False
+
+    if warns:
+        print(_color(f"  {len(warns)} 个提示（不影响使用）：", C.YELLOW))
+        for it in warns:
+            print(f"    ! {it.title}")
+        print()
+
+    print(_color("  ✓ 环境检测通过", C.GREEN + C.BOLD))
+    print()
+    return True
+
+
 def run_menu() -> int:
+    from ..device.monitor import DeviceMonitor
+
+    # ── 第一步：环境检测（必须先过） ──
+    env_ok = startup_env_check()
+
     sess = Session()
-    refresh_device(sess)
+
+    # ── 启动实时设备监测 ──
+    mon = DeviceMonitor(interval=1.5)
+
+    def _on_change(snap) -> None:
+        # 状态变化时打印一行提示（不清屏，避免打断用户正在阅读的内容）
+        if snap.present:
+            print(
+                _color(
+                    f"\n  [设备] 已连接 {snap.model or snap.codename} [{snap.mode}]",
+                    C.GREEN,
+                )
+            )
+        else:
+            print(_color("\n  [设备] 已断开连接", C.RED))
+
+    mon.on_change = _on_change
+    mon.start()
 
     handlers = {
-        "1": _menu_unpack,
-        "2": _menu_inspect,
-        "3": _menu_choose_package,
-        "4": lambda s: _menu_flash(s, dry_run=True),
-        "5": lambda s: _menu_flash(s, dry_run=False),
-        "6": lambda s: _menu_flash(s, dry_run=False, pick=True),
-        "7": _menu_backup,
-        "8": _menu_arb,
-        "9": _menu_device_info,
-        "10": _menu_reboot,
-        "11": _menu_selfcheck,
-        "12": _menu_about,
+        "1": _flow_unpack,
+        "2": lambda s_, m: _flow_flash(s_, m, dry_run=True),
+        "3": lambda s_, m: _flow_flash(s_, m, dry_run=False),
+        "4": lambda s_, m: _flow_flash(s_, m, dry_run=False, pick=True),
+        "5": _menu_backup,
+        "6": _menu_arb,
+        "7": _menu_device_info,
+        "8": _menu_reboot,
+        "9": _menu_selfcheck,
+        "10": _menu_about,
     }
 
-    while True:
-        print_header(sess)
-        print(MENU)
-        try:
-            choice = input(f"  {_color('请选择', C.BOLD)}: ").strip()
-        except (EOFError, KeyboardInterrupt):
+    try:
+        while True:
+            print_header(sess, mon)
+            print(build_menu(sess, env_ok))
             print()
-            return 0
-
-        if choice == "0":
-            print("  再见。\n")
-            return 0
-
-        handler = handlers.get(choice)
-        if not handler:
-            print(f"  {_color('无效选择', C.YELLOW)}")
-            pause()
-            continue
-
-        try:
-            handler(sess)
-        except SystemExit:
-            raise
-        except KeyboardInterrupt:
-            print(f"\n  {_color('已取消', C.YELLOW)}")
-            pause()
-        except Exception as exc:
-            print(f"\n  {_color('出错了:', C.RED)} {exc}")
-            pause()
-        finally:
-            # 每次操作后刷新设备状态
             try:
-                refresh_device(sess)
-            except Exception:
-                pass
+                choice = input(f"  {_color('请选择', C.BOLD)}: ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                return 0
+
+            if choice == "0":
+                print("  再见。\n")
+                return 0
+
+            handler = handlers.get(choice)
+            if not handler:
+                print(f"  {_color('无效选择', C.YELLOW)}")
+                pause()
+                continue
+
+            try:
+                handler(sess, mon)
+            except SystemExit:
+                raise
+            except KeyboardInterrupt:
+                print(f"\n  {_color('已取消', C.YELLOW)}")
+                pause()
+            except Exception as exc:
+                print(f"\n  {_color('出错了:', C.RED)} {exc}")
+                pause()
+            finally:
+                try:
+                    mon.refresh_now()
+                except Exception:
+                    pass
+    finally:
+        mon.stop()
 
 
-# ---------------------------------------------------------------------------
-# 各菜单项
-# ---------------------------------------------------------------------------
+def _flow_unpack(sess: Session, mon) -> None:
+    """流程一：选择 ROM 包 -> 分析 -> 解包。
 
-def _require_package(sess: Session) -> bool:
-    if sess.package and sess.package.exists():
-        return True
-    print(f"\n  {_color('请先选择 ROM 包（菜单 3）', C.YELLOW)}")
-    pause()
-    return False
+    用户的诉求：不要把"选择 ROM 包"做成独立菜单项，
+    而是把它内嵌在"解全量包"这一步里。
+    """
+    from ..core.package import Severity, Verdict, inspect_package
+    from ..core.unpack import unpack_package, write_index
 
-
-def _require_images(sess: Session) -> Path | None:
-    d = sess.image_dir
-    if d and d.exists() and any(d.glob("*.img")):
-        return d
-    print(f"\n  {_color('尚未解包，请先执行菜单 1（解全量包）', C.YELLOW)}")
-    pause()
-    return None
-
-
-def _menu_choose_package(sess: Session) -> None:
+    _clear_screen()
+    print()
+    print(_color("  ── 解全量包 " + "─" * 44, C.BOLD))
     print()
     print("  请输入 ROM 包路径（.zip 文件，可直接把文件拖进终端）")
-    p = ask_path("路径", str(sess.package) if sess.package else "")
+    if sess.package and sess.package.exists():
+        print(f"  {_color('直接回车可沿用上次的选择', C.DIM)}")
+    print()
+
+    default = str(sess.package) if sess.package and sess.package.exists() else ""
+    p = ask_path("ROM 包", default)
     if not p:
-        return
+        if default:
+            p = Path(default)
+        else:
+            print(f"  {_color('未选择包', C.YELLOW)}")
+            pause()
+            return
+
     if not p.exists():
         print(f"  {_color('文件不存在:', C.RED)} {p}")
         pause()
         return
+
     sess.package = p
     sess.save_state()
-    print(f"  {_color('✓', C.GREEN)} 已选择: {p}")
-    pause()
 
+    # ---- 分析包 ----
+    print()
+    print("  正在分析包…")
+    info = inspect_package(p)
 
-def _menu_inspect(sess: Session) -> None:
-    from ..cli import print_info
-    from ..core.package import inspect_package
+    print()
+    if info.product_name:
+        print(f"    型号    : {info.product_name} ({info.pre_device or '?'})")
+    if info.version_name:
+        print(f"    版本    : {info.version_name}")
+    if info.android_version:
+        print(f"    Android : {info.android_version}")
+    print(f"    包类型  : {info.kind.value}")
+    if info.manifest:
+        print(f"    分区数  : {len(info.manifest.partitions)}")
 
-    if not _require_package(sess):
-        return
-    print_info(inspect_package(sess.package))
-    pause()
-
-
-def _menu_unpack(sess: Session) -> None:
-    from ..core.package import Severity, Verdict, inspect_package
-    from ..core.unpack import unpack_package, write_index
-
-    if not _require_package(sess):
-        return
-
-    info = inspect_package(sess.package)
     if info.verdict is not Verdict.FLASHABLE:
-        print(f"\n  {_color('此包不能解包:', C.RED + C.BOLD)} {info.verdict.value}")
+        print()
+        print(f"  {_color('此包不能线刷:', C.RED + C.BOLD)} {info.verdict.value}")
         for f in info.findings:
             if f.severity in (Severity.BLOCKER, Severity.DANGER):
-                print(f"    {f.message}")
+                print(f"    · {f.message}")
         pause()
         return
 
+    # ---- 型号核对（若设备已连接）----
+    snap = mon.snapshot if mon else None
+    if snap and snap.present and info.pre_device and snap.codename:
+        if snap.codename != info.pre_device:
+            print()
+            print(
+                _color(
+                    f"  ⚠ 型号不一致：包要求 {info.pre_device}，"
+                    f"设备是 {snap.codename}",
+                    C.RED + C.BOLD,
+                )
+            )
+            if not confirm("型号不匹配，仍要解包吗？"):
+                return
+        else:
+            print(f"    {_color('✓', C.GREEN)} 型号匹配: {snap.codename}")
+
+    # ---- 解包 ----
     out = sess.image_dir
     assert out is not None
     print()
     print(f"  输出目录: {out}")
     if out.exists():
         n = len(list(out.glob("*.img")))
-        if n and not confirm(f"目录已有 {n} 个镜像，覆盖吗？"):
+        if n and not confirm(f"已有 {n} 个镜像，覆盖吗？"):
             return
 
     print()
@@ -352,34 +428,45 @@ def _menu_unpack(sess: Session) -> None:
         counter["n"] += 1
         mark = _color("✓", C.GREEN) if res.ok else _color("✗", C.RED)
         detail = f"{res.size_mb:>9,.1f} MB" if res.ok else res.error
-        print(f"\r  {res.partition:<18} {mark} {detail:<34}")
+        print(f"  [{counter['n']:2}] {res.partition:<18} {mark} {detail:<36}")
 
-    results = unpack_package(sess.package, out, result_cb=on_result)
+    results = unpack_package(p, out, result_cb=on_result)
     write_index(results, out)
 
     ok = sum(1 for r in results if r.ok)
     print()
-    if ok == len(results) and results:
-        print(f"  {_color(f'✓ 解包完成：{ok} 个分区', C.GREEN + C.BOLD)}")
+    if results and ok == len(results):
+        print(_color(f"  ✓ 解包完成：{ok} 个分区", C.GREEN + C.BOLD))
     else:
-        print(f"  {_color(f'完成 {ok}/{len(results)}', C.RED)}")
+        print(_color(f"  完成 {ok}/{len(results)}", C.RED))
     pause()
 
 
-def _menu_flash(sess: Session, *, dry_run: bool, pick: bool = False) -> None:
+def _flow_flash(sess: Session, mon, *, dry_run: bool, pick: bool = False) -> None:
     import argparse
 
     from ..cli import cmd_flash
 
-    if not _require_package(sess):
+    if not sess.unpacked:
+        print()
+        print(f"  {_color('尚未解包，请先执行菜单 1（解全量包）', C.YELLOW)}")
+        pause()
         return
-    img_dir = _require_images(sess)
-    if img_dir is None:
+
+    # 危险操作前必须重新确认真实设备状态（监测快照可能滞后）
+    snap = mon.refresh_now() if mon else None
+    if not snap or not snap.present:
+        print()
+        print(f"  {_color('当前未检测到设备', C.RED + C.BOLD)}")
+        print("  请检查：")
+        print("    · 数据线是否插好")
+        print("    · 手机是否开启 USB 调试")
+        pause()
         return
 
     ns = argparse.Namespace(
         package=sess.package,
-        images=str(img_dir),
+        images=str(sess.image_dir),
         dry_run=dry_run,
         yes=False,
         partitions=None,
@@ -394,13 +481,11 @@ def _menu_flash(sess: Session, *, dry_run: bool, pick: bool = False) -> None:
 
     if dry_run:
         print()
-        print(f"  {_color('预演检查 = 检查能不能刷，但什么都不写。', C.BOLD)}")
-        print("  它会告诉你：")
-        print("    · 一共要写多少数据、分几个阶段")
-        print("    · 镜像文件是否完整（缺失/空文件会提前发现）")
-        print("    · 有哪些风险分区会被写入")
-        print("    · 会不会丢数据")
-        print("    · 最终结论：现在能不能刷")
+        print(_color("  预演检查：只看能不能刷，不写入任何数据。", C.BOLD))
+        print()
+        cmd_flash(ns)
+        pause()
+        return
 
     if pick:
         print()
@@ -410,19 +495,16 @@ def _menu_flash(sess: Session, *, dry_run: bool, pick: bool = False) -> None:
             return
         ns.partitions = raw.split()
 
-    if not dry_run:
-        print()
-        print(f"  {_color('刷写选项：', C.BOLD)}")
-        if confirm("同时刷写 A/B 两个槽位？（更安全，耗时翻倍）"):
-            ns.both_slots = True
-        if confirm("清空用户数据？（降级或救砖必须选 y）"):
-            ns.wipe = True
+    print()
+    print(f"  {_color('刷写选项：', C.BOLD)}")
+    if confirm("清空用户数据？（降级或救砖必须选 y）"):
+        ns.wipe = True
 
     cmd_flash(ns)
     pause()
 
 
-def _menu_backup(sess: Session) -> None:
+def _menu_backup(sess: Session, mon) -> None:
     import argparse
 
     from ..cli import cmd_backup
@@ -431,7 +513,7 @@ def _menu_backup(sess: Session) -> None:
     pause()
 
 
-def _menu_arb(sess: Session) -> None:
+def _menu_arb(sess: Session, mon) -> None:
     import argparse
 
     from ..cli import cmd_arb
@@ -445,7 +527,7 @@ def _menu_arb(sess: Session) -> None:
     pause()
 
 
-def _menu_device_info(sess: Session) -> None:
+def _menu_device_info(sess: Session, mon) -> None:
     from ..device.discover import detect
 
     print()
@@ -464,7 +546,7 @@ def _menu_device_info(sess: Session) -> None:
     pause()
 
 
-def _menu_reboot(sess: Session) -> None:
+def _menu_reboot(sess: Session, mon) -> None:
     from ..device.discover import DeviceMode, detect
     from ..device.runner import AdbRunner, FastbootRunner
 
@@ -508,7 +590,7 @@ def _menu_reboot(sess: Session) -> None:
     pause()
 
 
-def _menu_selfcheck(sess: Session) -> None:
+def _menu_selfcheck(sess: Session, mon) -> None:
     import argparse
 
     from ..cli import cmd_selfcheck
@@ -517,7 +599,7 @@ def _menu_selfcheck(sess: Session) -> None:
     pause()
 
 
-def _menu_about(sess: Session) -> None:
+def _menu_about(sess: Session, mon) -> None:
     print()
     print(f"  {_color('Lrom', C.BOLD + C.MAGENTA)} v{__version__} · GPL-3.0-or-later")
     print("  https://github.com/Rovrry/Lrom")
