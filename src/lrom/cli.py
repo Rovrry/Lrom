@@ -203,6 +203,19 @@ def build_parser() -> argparse.ArgumentParser:
     pu.add_argument("-q", "--quiet", action="store_true", help="安静模式")
     pu.set_defaults(func=cmd_unpack)
 
+    pf = sub.add_parser("flash", help="执行刷写")
+    pf.add_argument("package", type=Path, help="ROM 包路径")
+    pf.add_argument(
+        "-i", "--images", default="unpacked/rom", help="镜像目录（默认 unpacked/rom）"
+    )
+    pf.add_argument("--dry-run", action="store_true", help="预演，不写设备")
+    pf.add_argument("--yes", action="store_true", help="跳过确认（危险）")
+    pf.add_argument("--partitions", nargs="+", default=None, help="只刷指定分区")
+    pf.add_argument("--allow-dangerous", action="store_true", help="允许写危险分区")
+    pf.add_argument("--no-reboot", action="store_true", help="刷完不重启")
+    pf.add_argument("--adb-port", type=int, default=None, help="adb server 端口")
+    pf.set_defaults(func=cmd_flash)
+
     return p
 
 
@@ -425,3 +438,181 @@ def cmd_unpack(args: argparse.Namespace) -> int:
     total_gb = sum(r.size for r in ok) / 2**30
     print(paint(f"✓ 解包完成：{len(ok)} 个分区，{total_gb:.2f} GB", C.GREEN + C.BOLD))
     return 0
+
+
+def cmd_flash(args: argparse.Namespace) -> int:
+    """执行刷写。"""
+    from .core.flash import (
+        FlashExecutor,
+        StepStatus,
+        preflight,
+        summarize,
+    )
+    from .core.package import Severity, Verdict, check_device_match, inspect_package
+    from .core.plan import Phase, build_plan
+    from .device.discover import DeviceMode, detect, list_partitions
+    from .device.runner import AdbRunner, FastbootRunner
+
+    dry_run = args.dry_run
+
+    # ---- 1) 包校验 ----
+    info = inspect_package(args.package)
+    if info.verdict is not Verdict.FLASHABLE or info.manifest is None:
+        print(paint(f"✗ 该包不能线刷: {info.verdict.value}", C.RED + C.BOLD))
+        return 1
+
+    image_dir = Path(args.images)
+    if not image_dir.exists():
+        print(paint(f"✗ 镜像目录不存在: {image_dir}", C.RED))
+        print(f"  请先运行: lrom unpack {args.package} -o {image_dir}")
+        return 1
+
+    # ---- 2) 设备探测 ----
+    dev = detect(adb_server_port=args.adb_port)
+    if not dev:
+        print(paint("✗ 未检测到设备", C.RED))
+        return 1
+
+    device_parts: set[str] = set()
+    if dev.mode is DeviceMode.ADB:
+        findings = check_device_match(info, dev.codename or "", dev.model)
+        blockers = [f for f in findings if f.severity is Severity.BLOCKER]
+        if blockers:
+            print(paint("✗ 型号不匹配，拒绝刷写", C.RED + C.BOLD))
+            for f in blockers:
+                print(f"  {f.message}")
+            return 1
+        adb = AdbRunner(server_port=args.adb_port)
+        device_parts = list_partitions(adb, dev.serial)
+
+    # ---- 3) 计划 ----
+    plan = build_plan(
+        info.manifest,
+        package_path=str(info.path),
+        device_model=dev.model,
+        device_codename=dev.codename,
+        slot=dev.slot,
+        device_partitions=device_parts or None,
+        allow_dangerous=args.allow_dangerous,
+        include=args.partitions,
+    )
+
+    # ---- 4) 前置检查 ----
+    issues = preflight(plan, image_dir, device_parts or None)
+    errors = [i for i in issues if i.severity == "error"]
+    if errors:
+        print(paint("✗ 前置检查未通过", C.RED + C.BOLD))
+        for i in errors:
+            print(f"  {i.message}")
+        return 1
+
+    # ---- 5) 展示计划 ----
+    fb_ops = plan.by_phase(Phase.FASTBOOT)
+    fbd_ops = plan.by_phase(Phase.FASTBOOTD)
+    print()
+    print(paint("╭─ 刷写计划 " + "─" * 46, C.BOLD))
+    print(f"│ 包     : {info.path.name}")
+    print(f"│ 设备   : {dev.model} ({dev.codename})  槽位: _{dev.slot}")
+    print(f"│ 阶段一 : {paint(f'Fastboot  {len(fb_ops)} 个分区', C.CYAN)}")
+    print(f"│ 阶段二 : {paint(f'FastbootD {len(fbd_ops)} 个分区', C.CYAN)}")
+    print(f"│ 总量   : {plan.total_bytes / 2**30:.2f} GB")
+    print(paint("╰" + "─" * 56, C.BOLD))
+
+    for i in issues:
+        if i.severity == "warn":
+            print(f"  {paint('!!', C.YELLOW)} {i.message}")
+
+    # ---- 6) 确认 ----
+    if not dry_run and not args.yes:
+        print()
+        print(paint("⚠️  这将实际写入设备，可能变砖。", C.RED + C.BOLD))
+        print("    请确认：电量 > 50%、数据线稳定、不要中途拔线。")
+        print()
+        try:
+            answer = input(f"  输入 {paint('FLASH', C.BOLD)} 确认开始，其他任何输入取消: ")
+        except (EOFError, KeyboardInterrupt):
+            print("\n已取消")
+            return 130
+        if answer.strip() != "FLASH":
+            print("已取消")
+            return 130
+
+    # ---- 7) 执行 ----
+    fb = FastbootRunner()
+    adb = AdbRunner(server_port=args.adb_port)
+    executor = FlashExecutor(
+        plan, image_dir, fb=fb, adb=adb, dry_run=dry_run
+    )
+
+    print()
+    mode = paint("[预演]", C.YELLOW) if dry_run else paint("[刷写]", C.GREEN)
+    print(f"{mode} 开始")
+    print()
+
+    total_bytes = plan.total_bytes
+    done_bytes = 0
+    current_phase = None
+
+    def on_step(sr) -> None:
+        nonlocal done_bytes, current_phase
+        # 阶段提示
+        if sr.partition in {op.partition for op in fb_ops}:
+            if current_phase != "fb":
+                current_phase = "fb"
+                print(paint("── 阶段一：Fastboot ──", C.BOLD))
+        else:
+            if current_phase != "fbd":
+                current_phase = "fbd"
+                print()
+                print(paint("── 阶段二：FastbootD ──", C.BOLD))
+
+        if sr.status is StepStatus.OK:
+            done_bytes += sr.size
+            pct = done_bytes / total_bytes * 100 if total_bytes else 0
+            print(
+                f"  {sr.partition:<18}{paint('✓', C.GREEN)} "
+                f"{sr.size_mb:>9,.1f} MB  {sr.duration:>6.1f}s  [{pct:5.1f}%]"
+            )
+        elif sr.status is StepStatus.SKIPPED:
+            print(f"  {sr.partition:<18}{paint('·', C.DIM)} {sr.message}")
+        else:
+            print(f"  {sr.partition:<18}{paint('✗', C.RED)} {sr.message}")
+
+    executor.on_step = on_step
+
+    try:
+        result = executor.run()
+    except KeyboardInterrupt:
+        print(paint("\n\n⚠️  用户中断", C.YELLOW))
+        return 130
+
+    # ---- 8) 汇总 ----
+    print()
+    print(paint("╭─ 结果 " + "─" * 48, C.BOLD))
+    for line in summarize(result).splitlines():
+        print(f"│ {line}")
+    print(paint("╰" + "─" * 56, C.BOLD))
+    print()
+
+    if dry_run:
+        print(paint("✓ 预演完成，未写入设备", C.GREEN + C.BOLD))
+        return 0
+
+    if result.ok:
+        print(paint("✓ 刷写完成", C.GREEN + C.BOLD))
+        if not args.no_reboot:
+            print("  正在重启设备…")
+            try:
+                fb.run("reboot", timeout=60)
+            except Exception as exc:
+                print(f"  重启失败: {exc}")
+                print("  请手动长按电源键重启")
+        return 0
+
+    print(paint("✗ 刷写失败", C.RED + C.BOLD))
+    print()
+    print("恢复建议:")
+    print("  · 设备应仍在 fastboot/fastbootd，可重新运行本命令")
+    print("  · 若无法进入系统，用备份恢复:")
+    print("      lrom restore backups/<机型>_<时间>/")
+    return 1
