@@ -82,6 +82,33 @@ def _udev_rules_present() -> tuple[bool, str]:
     return False, ""
 
 
+def _adb_servers() -> list[tuple[int, str, str]]:
+    """列出所有运行中的 adb server：(pid, user, 命令行)。"""
+    import pwd
+
+    out_rows: list[tuple[int, str, str]] = []
+    code, out = _run(["pgrep", "-a", "^adb$"])
+    if code != 0:
+        code, out = _run(["sh", "-c", "ps -eo pid,user,args | grep '[a]db -L tcp'"])
+    for line in out.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split(None, 2)
+        if len(parts) < 2:
+            continue
+        try:
+            pid = int(parts[0])
+        except ValueError:
+            continue
+        try:
+            owner = pwd.getpwuid(os.stat(f"/proc/{pid}").st_uid).pw_name
+        except Exception:
+            owner = parts[1]
+        out_rows.append((pid, owner, parts[-1] if len(parts) > 2 else ""))
+    return out_rows
+
+
 def _adb_server_owner_ok(adb_path: str) -> tuple[bool, str]:
     """检查 adb server 是否被其他用户（通常是 root）占用。"""
     code, out = _run(["pgrep", "-a", "adb"])
@@ -212,21 +239,41 @@ def run_selfcheck() -> list[CheckItem]:
                 )
             )
 
-    # ---- adb server 归属 ----
+    # ---- adb server ----
     if tools.get("adb"):
-        ok, detail = _adb_server_owner_ok(tools["adb"])  # type: ignore[arg-type]
-        if ok:
-            items.append(CheckItem(Level.OK, "adb server", detail))
-        else:
+        servers = _adb_servers()
+        if len(servers) > 1:
+            ports = []
+            for _pid, _owner, cmd in servers:
+                for tok in cmd.split():
+                    if tok.startswith("tcp:"):
+                        ports.append(tok[4:])
+            detail = "检测到 " + str(len(servers)) + " 个 adb server 同时在运行"
+            if ports:
+                detail += "（端口: " + ", ".join(ports) + "）"
             items.append(
                 CheckItem(
                     Level.WARN,
-                    "adb server 归属异常",
-                    detail,
-                    "adb kill-server        # 然后用普通用户重新运行 lrom\n"
-                    "    （绝不要用 sudo 运行 adb/fastboot，否则 server 会被 root 占用）",
+                    "多个 adb server 冲突",
+                    detail + "\n    它们会互相抢占设备，导致时好时坏",
+                    "adb kill-server && pkill -f 'adb -L tcp'\n"
+                    "    然后重新运行 lrom（正常只应有 1 个 server，端口 5037）",
                 )
             )
+        else:
+            ok, detail = _adb_server_owner_ok(tools["adb"])  # type: ignore[arg-type]
+            if ok:
+                items.append(CheckItem(Level.OK, "adb server", detail))
+            else:
+                items.append(
+                    CheckItem(
+                        Level.WARN,
+                        "adb server 归属异常",
+                        detail,
+                        "adb kill-server        # 然后用普通用户重新运行 lrom\n"
+                        "    （绝不要用 sudo 运行 adb/fastboot，否则 server 会被 root 占用）",
+                    )
+                )
 
     # ---- USB 设备可见性 ----
     usb = _usb_android_devices()
