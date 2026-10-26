@@ -36,6 +36,48 @@ def _color(s: str, c: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# 输入辅助
+# ---------------------------------------------------------------------------
+
+def ask(prompt: str, default: str = "") -> str:
+    suffix = f" {_color('[' + default + ']', C.DIM)}" if default else ""
+    try:
+        return input(f"  {prompt}{suffix}: ").strip() or default
+    except (EOFError, KeyboardInterrupt):
+        print()
+        raise SystemExit(0)
+
+
+def ask_path(prompt: str, default: str = "") -> Path | None:
+    raw = ask(prompt, default)
+    if not raw:
+        return None
+    return Path(os.path.expanduser(raw.strip().strip("'\"").replace("\\ ", " ")))
+
+
+def confirm(prompt: str, word: str | None = None) -> bool:
+    """确认。word 非空时必须完整输入该词。"""
+    if word:
+        print()
+        print(_color(f"  ⚠  {prompt}", C.RED + C.BOLD))
+        print(f"  输入 {_color(word, C.BOLD)} 确认，其他任意输入取消: ", end="")
+        try:
+            return input().strip() == word
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return False
+    return ask(f"{prompt} (y/N)", "n").lower().startswith("y")
+
+
+def pause(msg: str = "按回车继续…") -> None:
+    try:
+        input(f"\n  {_color(msg, C.DIM)}")
+    except (EOFError, KeyboardInterrupt):
+        print()
+        raise SystemExit(0)
+
+
+# ---------------------------------------------------------------------------
 # 状态
 # ---------------------------------------------------------------------------
 
@@ -518,11 +560,12 @@ def _menu_arb(sess: Session, mon) -> None:
 
     from ..cli import cmd_arb
 
-    if not _require_package(sess):
+    if not sess.unpacked:
+        print()
+        print(f"  {_color('尚未解包，请先执行菜单 1（解全量包）', C.YELLOW)}")
+        pause()
         return
-    img_dir = _require_images(sess)
-    if img_dir is None:
-        return
+    img_dir = sess.image_dir
     cmd_arb(argparse.Namespace(images=str(img_dir), xbl_config=None, adb_port=None))
     pause()
 

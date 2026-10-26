@@ -2,6 +2,42 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.1] - 2026-10-27
+
+### 修复：菜单点击部分选项直接崩溃
+
+**现象**（用户实测）：
+
+```
+请选择: 7
+  设备序列号: ***REDACTED***
+  ...
+  出错了: name 'pause' is not defined
+NameError: name 'pause' is not defined
+```
+
+**原因**：v0.3.0 重构 menu.py 时用脚本批量改动，
+`ask` / `ask_path` / `confirm` / `pause` 四个输入辅助函数被误删。
+Python 语法检查发现不了（名字在运行时才解析），
+所以静态检查通过、发布后用户一点就崩。
+
+**修复**：
+- 补回四个输入辅助函数
+- 修复 `_menu_arb` 对已删除的 `_require_package` / `_require_images` 的引用
+
+### 新增：菜单完整性测试（防止复发）
+
+`tests/unit/test_menu_integrity.py`（18 个用例）：
+
+- `test_no_undefined_module_level_calls` — AST 解析，找出所有被调用但未定义的名字
+- `test_required_helpers_exist` — 校验 ask/ask_path/confirm/pause 等基础设施存在
+- `test_menu_handlers_signature` — 每个菜单处理函数必须是 `(sess, mon)`
+- `test_all_handlers_referenced_in_run_menu` — run_menu 注册的处理函数必须真实存在
+
+已实测验证：临时删掉 `pause` 后，该测试立即失败并给出准确提示。
+
+测试总数 96 → 114。
+
 ## [0.3.0] - 2026-10-27
 
 ### 变更：交互流程重构（按用户反馈）
