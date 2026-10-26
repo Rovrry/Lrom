@@ -58,9 +58,20 @@ class Session:
 
     @property
     def image_dir(self) -> Path | None:
+        """解包产物目录。自动在几个常见位置查找已解包的镜像。"""
         if not self.package:
             return None
-        return self.work_dir / self.package.stem
+        stem = self.package.stem
+        candidates = [
+            self.work_dir / stem,
+            Path("unpacked") / stem,
+            Path("work") / stem,
+        ]
+        for c in candidates:
+            if c.exists() and any(c.glob("*.img")):
+                return c
+        # 都不存在时返回默认位置（用于新建）
+        return self.work_dir / stem
 
     def save_state(self) -> None:
         from ..device.tools import load_config, save_config
@@ -130,8 +141,8 @@ MENU = f"""
    {_color('3', C.CYAN)}) 选择 ROM 包       指定要操作的包
 
   {_color('─ 刷写 ────────────────────────────────────────', C.DIM)}
-   {_color('4', C.CYAN)}) 预演检查          模拟刷写，不写设备
-   {_color('5', C.CYAN)}) 线刷全量包        执行刷写（需确认）
+   {_color('4', C.CYAN)}) 预演检查          ★ 强烈建议先做（不写设备）
+   {_color('5', C.CYAN)}) 线刷全量包        真正写入设备（需确认）
    {_color('6', C.CYAN)}) 只刷指定分区      手动选择分区
 
   {_color('─ 安全 ────────────────────────────────────────', C.DIM)}
@@ -148,8 +159,21 @@ MENU = f"""
 """
 
 
+def _clear_screen() -> None:
+    """清屏。仅在真正的终端里做，且允许用 LROM_NO_CLEAR=1 关闭。"""
+    if os.environ.get("LROM_NO_CLEAR"):
+        print("\n" * 2)
+        return
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        # 管道/重定向场景不清屏，避免把输出冲掉
+        print("\n" * 2)
+        return
+    sys.stdout.write("\033[2J\033[H")
+    sys.stdout.flush()
+
+
 def print_header(sess: Session) -> None:
-    os.system("clear")
+    _clear_screen()
     print()
     print(_color("  ┌" + "─" * 58 + "┐", C.MAGENTA))
     print(
@@ -293,6 +317,7 @@ def _menu_inspect(sess: Session) -> None:
     if not _require_package(sess):
         return
     print_info(inspect_package(sess.package))
+    pause()
 
 
 def _menu_unpack(sess: Session) -> None:
@@ -367,6 +392,16 @@ def _menu_flash(sess: Session, *, dry_run: bool, pick: bool = False) -> None:
         adb_port=None,
     )
 
+    if dry_run:
+        print()
+        print(f"  {_color('预演检查 = 检查能不能刷，但什么都不写。', C.BOLD)}")
+        print("  它会告诉你：")
+        print("    · 一共要写多少数据、分几个阶段")
+        print("    · 镜像文件是否完整（缺失/空文件会提前发现）")
+        print("    · 有哪些风险分区会被写入")
+        print("    · 会不会丢数据")
+        print("    · 最终结论：现在能不能刷")
+
     if pick:
         print()
         print("  输入要刷的分区名，空格分隔（例如: boot init_boot system）")
@@ -384,6 +419,7 @@ def _menu_flash(sess: Session, *, dry_run: bool, pick: bool = False) -> None:
             ns.wipe = True
 
     cmd_flash(ns)
+    pause()
 
 
 def _menu_backup(sess: Session) -> None:

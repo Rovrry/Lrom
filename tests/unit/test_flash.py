@@ -406,3 +406,54 @@ def test_both_slots_off_by_default(tmp_path):
 
     flashed = [c[1] for c in fb.calls if c and c[0] == "flash"]
     assert "boot_a" not in flashed  # 默认只刷不带槽位的名字
+
+
+# -- 预演报告 -----------------------------------------------------------
+
+def test_dry_run_report_has_all_sections(tmp_path):
+    from lrom.core.flash import dry_run_report
+
+    plan = make_plan(tmp_path)
+    report = dry_run_report(plan, tmp_path)
+
+    for section in ("刷写规模", "镜像完整性", "风险项", "数据影响", "结论"):
+        assert section in report
+
+
+def test_dry_run_report_detects_missing_image(tmp_path):
+    from lrom.core.flash import dry_run_report
+
+    plan = make_plan(tmp_path)
+    (tmp_path / "boot.img").unlink()
+    report = dry_run_report(plan, tmp_path)
+
+    assert "缺失" in report
+    assert "不能刷" in report
+
+
+def test_dry_run_report_detects_empty_image(tmp_path):
+    from lrom.core.flash import dry_run_report
+
+    plan = make_plan(tmp_path)
+    (tmp_path / "boot.img").write_bytes(b"")
+    report = dry_run_report(plan, tmp_path)
+
+    assert "空文件" in report
+
+
+def test_dry_run_report_says_data_preserved(tmp_path):
+    from lrom.core.flash import dry_run_report
+
+    plan = make_plan(tmp_path)
+    report = dry_run_report(plan, tmp_path)
+
+    assert "不会动 userdata" in report
+
+
+def test_dry_run_report_ok_conclusion(tmp_path):
+    from lrom.core.flash import dry_run_report
+
+    plan = make_plan(tmp_path)
+    report = dry_run_report(plan, tmp_path)
+
+    assert "可以安全刷写" in report or "可以刷" in report

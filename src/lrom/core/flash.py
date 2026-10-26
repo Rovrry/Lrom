@@ -657,3 +657,94 @@ def summarize(result: FlashResult) -> str:
         lines.append(f"中止原因: {result.error}")
 
     return "\n".join(lines)
+
+
+def dry_run_report(plan: FlashPlan, image_dir: Path) -> str:
+    """生成预演报告：告诉用户"如果现在刷，会发生什么"。
+
+    与真正的执行日志不同，这里不逐条打印分区，而是回答四个关键问题：
+      1. 会写入多少数据、分几个阶段
+      2. 有没有风险项（危险分区 / 会跳过的分区）
+      3. 镜像是否完整（缺失 / 空文件）
+      4. 数据会不会丢
+    """
+    lines: list[str] = []
+
+    fb_ops = plan.by_phase(Phase.FASTBOOT)
+    fbd_ops = plan.by_phase(Phase.FASTBOOTD)
+    active = plan.active_ops
+
+    # ---- 1. 规模 ----
+    lines.append("【刷写规模】")
+    lines.append(f"  阶段一 Fastboot   : {len(fb_ops):>2} 个分区")
+    lines.append(f"  阶段二 FastbootD  : {len(fbd_ops):>2} 个逻辑分区")
+    lines.append(f"  合计写入          : {plan.total_bytes / 2**30:.2f} GB")
+
+    # ---- 2. 镜像完整性 ----
+    missing, empty = [], []
+    for op in active:
+        if not op.image:
+            continue
+        p = image_dir / op.image
+        if not p.exists():
+            missing.append(op.image)
+        elif p.stat().st_size == 0:
+            empty.append(op.image)
+
+    lines.append("")
+    lines.append("【镜像完整性】")
+    if missing or empty:
+        if missing:
+            lines.append(f"  ✗ 缺失 {len(missing)} 个: {', '.join(missing[:5])}")
+        if empty:
+            lines.append(f"  ✗ 空文件 {len(empty)} 个: {', '.join(empty[:5])}")
+        lines.append("  → 现在刷会失败，请先重新解包")
+    else:
+        total_files = len([op for op in active if op.image])
+        lines.append(f"  ✓ {total_files} 个镜像文件全部存在且非空")
+
+    # ---- 3. 风险项 ----
+    lines.append("")
+    lines.append("【风险项】")
+    danger = [op.partition for op in active if op.risk is Risk.DANGER]
+    blocked = [op.partition for op in plan.ops if op.skip and op.risk is Risk.BLOCKED]
+
+    if not danger and not blocked:
+        lines.append("  ✓ 无风险项")
+    if danger:
+        lines.append(
+            f"  ! {len(danger)} 个 bootloader 链分区将被写入："
+        )
+        lines.append(f"      {', '.join(danger[:10])}")
+        lines.append("      这些是官方全量包的正常内容，但写错会导致无法开机")
+    if blocked:
+        lines.append(f"  · {len(blocked)} 个分区将被跳过（保护 IMEI/指纹/密钥）：")
+        lines.append(f"      {', '.join(blocked[:10])}")
+
+    # ---- 4. 数据影响 ----
+    lines.append("")
+    lines.append("【数据影响】")
+    skipped_parts = [op.partition for op in plan.ops if op.skip]
+    active_names = {op.partition for op in active}
+    if "userdata" in active_names:
+        lines.append("  ✗ userdata 将被刷写 —— 会清空所有用户数据")
+    else:
+        lines.append("  ✓ 不会动 userdata，用户数据保留")
+
+    if skipped_parts:
+        lines.append(
+            f"  说明: {len(skipped_parts)} 个分区被跳过，"
+            f"实际写入 {len(active)} 个分区"
+        )
+
+    # ---- 5. 结论 ----
+    lines.append("")
+    lines.append("【结论】")
+    if missing or empty:
+        lines.append("  ✗ 现在不能刷 —— 镜像不完整")
+    elif plan.blocked_ops:
+        lines.append("  ✓ 可以刷（部分保护分区会跳过）")
+    else:
+        lines.append("  ✓ 可以安全刷写")
+
+    return "\n".join(lines)

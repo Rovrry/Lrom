@@ -480,6 +480,7 @@ def cmd_flash(args: argparse.Namespace) -> int:
     from .core.flash import (
         FlashExecutor,
         StepStatus,
+        dry_run_report,
         preflight,
         summarize,
     )
@@ -682,9 +683,21 @@ def cmd_flash(args: argparse.Namespace) -> int:
         on_notice=lambda msg: print(paint(f"  {msg}", C.YELLOW)),
     )
 
+    # ---- 预演：只出报告，不逐条模拟 ----
+    if dry_run:
+        print()
+        print(paint("╭─ 预演报告 " + "─" * 44, C.BOLD))
+        report = dry_run_report(plan, image_dir)
+        for line in report.splitlines():
+            print(f"│ {line}")
+        print(paint("╰" + "─" * 56, C.BOLD))
+        print()
+        print(paint("预演不会写入任何数据。确认无误后去掉 --dry-run 再执行。", C.DIM))
+        print()
+        return 0
+
     print()
-    mode = paint("[预演]", C.YELLOW) if dry_run else paint("[刷写]", C.GREEN)
-    print(f"{mode} 开始")
+    print(paint("[刷写] 开始", C.GREEN))
     print()
 
     total_bytes = plan.total_bytes
