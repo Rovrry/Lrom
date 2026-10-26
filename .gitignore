@@ -44,3 +44,6 @@ plans/
 
 # 解包产物
 unpacked/
+
+# 待 token 加 workflow 权限后再提交
+.github/
