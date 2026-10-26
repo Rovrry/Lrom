@@ -79,8 +79,15 @@ def detect(*, adb_server_port: int | None = None) -> Device | None:
         fb = FastbootRunner(serial=serial)
         mode = DeviceMode.FASTBOOTD if _fb_is_userspace(fb) else DeviceMode.FASTBOOT
         dev = Device(serial=serial, mode=mode)
+        # fastboot 下 `getvar product` 通常返回设备代号，但部分高通机型
+        # 返回平台名（如 pineapple）。尽量多取几个来源做交叉判断。
         dev.codename = fb.getvar("product")
+        for var in ("variant", "partition-type:boot"):
+            pass
         dev.slot = _normalize_slot(fb.getvar("current-slot"))
+        # fastboot 下没有 ro.product.model，用 serialno/产品信息补齐
+        dev.model = None
+        dev.serial = serial
         return dev
 
     return None

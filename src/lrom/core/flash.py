@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import re
 import shutil
 import time
 from dataclasses import dataclass, field
@@ -28,6 +29,7 @@ class StepStatus(Enum):
     OK = "成功"
     FAILED = "失败"
     SKIPPED = "已跳过"
+    LOCKED = "锁定（需 unlock_critical）"
     BLOCKED = "已阻止"
 
 
@@ -59,7 +61,10 @@ class FlashResult:
         return (
             not self.aborted
             and not self.error
-            and all(s.status in (StepStatus.OK, StepStatus.SKIPPED) for s in self.steps)
+            and all(
+                s.status in (StepStatus.OK, StepStatus.SKIPPED, StepStatus.LOCKED)
+                for s in self.steps
+            )
             and len(self.steps) > 0
         )
 
@@ -222,6 +227,18 @@ class FlashExecutor:
 
         # 提取失败原因
         msg = _extract_error(res)
+
+        # 关键分区未解锁：这不是致命错误，可跳过继续
+        if is_critical_locked(msg):
+            return StepResult(
+                op.partition,
+                StepStatus.LOCKED,
+                duration=duration,
+                size=size,
+                message="关键分区未解锁，已跳过",
+                recovery_hint="fastboot flashing unlock_critical  # 风险高，谨慎",
+            )
+
         return StepResult(
             op.partition,
             StepStatus.FAILED,
@@ -251,6 +268,7 @@ class FlashExecutor:
             if sr.status is StepStatus.FAILED:
                 # 致命失败：立即中止，不再往下刷
                 return False
+            # LOCKED（关键分区未解锁）不中止，继续下一分区
 
         return True
 
@@ -381,20 +399,52 @@ class FlashExecutor:
         return False
 
 
+#: fastboot 对关键分区未解锁时的错误特征
+_CRITICAL_LOCK_PATTERNS = (
+    "not allowed for critical partitions",
+    "flashing is not allowed",
+    "critical partitions",
+)
+
+
+def is_critical_locked(message: str) -> bool:
+    """判断失败原因是否为"关键分区未解锁"。"""
+    low = message.lower()
+    return any(p in low for p in _CRITICAL_LOCK_PATTERNS)
+
+
 def _extract_error(res: RunResult) -> str:
-    """从 fastboot 输出中提取失败原因。"""
-    text = res.combined
-    for line in text.splitlines():
-        ls = line.strip()
-        if not ls:
-            continue
-        upper = ls.upper()
-        if upper.startswith("FAILED") or ls.lower().startswith("error"):
-            return ls[:200]
+    """从 fastboot 输出中提取失败原因。
+
+    注意：fastboot 的错误信息可能跨多行（remote 消息内含换行），
+    例如 "FAILED (remote: 'Flashing is not allowed for Critical Partitions.\n')"。
+    因此这里对整体文本做搜索，而不是逐行匹配。
+    """
     if res.timed_out:
         return "命令超时"
+
+    text = res.combined
+
+    # 优先提取 remote / FAILED 里的实际原因
+    for pattern in (
+        r"FAILED\s*\(?\s*remote:\s*'?([^'\n]+)",
+        r"FAILED\s*\(?([^)\n]+)",
+    ):
+        m = re.search(pattern, text, re.IGNORECASE)
+        if m:
+            return m.group(1).strip()[:200]
+
+    for line in text.splitlines():
+        ls = line.strip()
+        if ls and ls.lower().startswith("error"):
+            return ls[:200]
+
     if res.exit_code != 0:
-        return f"退出码 {res.exit_code}"
+        # 没有可识别的错误行时，把最后几行非空内容附上
+        tail = [x for x in text.splitlines() if x.strip()]
+        hint = tail[-1].strip()[:150] if tail else ""
+        return f"退出码 {res.exit_code}" + (f": {hint}" if hint else "")
+
     return text.strip().splitlines()[-1][:200] if text.strip() else "未知错误"
 
 
@@ -405,9 +455,12 @@ def summarize(result: FlashResult) -> str:
     fail = result.failed
     skipped = [s for s in result.steps if s.status is StepStatus.SKIPPED]
 
+    locked = [s for s in result.steps if s.status is StepStatus.LOCKED]
     lines.append(f"成功: {len(ok)} 个分区")
     if skipped:
         lines.append(f"跳过: {len(skipped)} 个分区")
+    if locked:
+        lines.append(f"锁定: {len(locked)} 个分区（关键分区，需 unlock_critical）")
     if fail:
         lines.append(f"失败: {len(fail)} 个分区")
     lines.append(f"耗时: {result.elapsed:.1f} 秒")

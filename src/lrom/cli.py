@@ -484,6 +484,17 @@ def cmd_flash(args: argparse.Namespace) -> int:
             return 1
         adb = AdbRunner(server_port=args.adb_port)
         device_parts = list_partitions(adb, dev.serial)
+    else:
+        # fastboot 模式下无法读取 ro.product.*，型号校验以包内 pre-device
+        # 与 getvar product 的宽松比对为准，不一致时警告但不阻止
+        if info.pre_device and dev.codename and info.pre_device != dev.codename:
+            print(
+                paint(
+                    f"  !! fastboot 下代号为 {dev.codename}，包要求 {info.pre_device}"
+                    f"（部分平台此处返回平台名，属正常）",
+                    C.YELLOW,
+                )
+            )
 
     # ---- 3) 计划 ----
     plan = build_plan(
@@ -581,6 +592,9 @@ def cmd_flash(args: argparse.Namespace) -> int:
             )
         elif sr.status is StepStatus.SKIPPED:
             print(f"  {sr.partition:<18}{paint('·', C.DIM)} {sr.message}")
+        elif sr.status is StepStatus.LOCKED:
+            print(f"  {sr.partition:<18}{paint('🔒', C.YELLOW)} 关键分区未解锁，跳过")
+            done_bytes += sr.size
         else:
             print(f"  {sr.partition:<18}{paint('✗', C.RED)} {sr.message}")
 

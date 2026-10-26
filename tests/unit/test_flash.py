@@ -219,3 +219,57 @@ def test_summarize_reports_failure():
     assert "成功: 1" in text
     assert "失败: 1" in text
     assert "fastboot flash system" in text
+
+
+# -- 关键分区锁定处理 ---------------------------------------------------
+
+def test_is_critical_locked_detects_message():
+    from lrom.core.flash import is_critical_locked
+
+    assert is_critical_locked(
+        "FAILED (remote: 'Flashing is not allowed for Critical Partitions.')"
+    )
+    assert not is_critical_locked("FAILED (remote: 'no space')")
+
+
+def test_locked_partition_does_not_abort(tmp_path):
+    """关键分区被锁时应跳过并继续刷后面的分区，而不是整体中止。"""
+    plan = make_plan(tmp_path, with_logical=False)
+    fb = FakeFastboot()
+    # 让第一个分区返回 critical 锁定错误
+    original_run = fb.run
+
+    def run_with_lock(*args, timeout=None):
+        if args and args[0] == "flash" and args[1] == "boot":
+            fb.calls.append(list(args))
+            return RunResult(
+                argv=list(args),
+                exit_code=1,
+                stderr="FAILED (remote: 'Flashing is not allowed for Critical Partitions.')",
+            )
+        return original_run(*args, timeout=timeout)
+
+    fb.run = run_with_lock
+
+    ex = make_executor(plan, tmp_path, fb)
+    result = ex.run()
+
+    locked = [s for s in result.steps if s.status is StepStatus.LOCKED]
+    assert len(locked) == 1
+    assert locked[0].partition == "boot"
+    # 后续分区仍被刷写
+    flashed = [c[1] for c in fb.calls if c and c[0] == "flash"]
+    assert "modem" in flashed
+    assert result.ok  # LOCKED 不算失败
+
+
+def test_locked_partition_counts_in_summary(tmp_path):
+    from lrom.core.flash import FlashResult, StepResult
+
+    r = FlashResult(plan=None)
+    r.steps = [
+        StepResult("boot", StepStatus.OK),
+        StepResult("tz", StepStatus.LOCKED, message="关键分区未解锁，已跳过"),
+    ]
+    text = summarize(r)
+    assert "锁定: 1" in text
