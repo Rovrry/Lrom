@@ -244,6 +244,9 @@ fastboot reboot      # 当前在 fastboot
 
 ## 开发
 
+**开发前请先读 [docs/DEVELOPER.md](docs/DEVELOPER.md)** —— 里面有完整的架构说明、
+踩坑记录与当前进度。
+
 ```bash
 # 运行测试
 python3 -m pytest tests/unit -q
