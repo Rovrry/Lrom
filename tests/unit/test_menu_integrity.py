@@ -47,11 +47,25 @@ def _collect_defined(tree: ast.Module) -> set[str]:
 
 
 def _collect_called(tree: ast.Module) -> set[str]:
-    return {
+    """收集被调用的本地函数名。
+
+    注意：要排除两种误报
+      1. 关键字参数名（f(redraw=...) 里的 redraw 不是被调用的函数）
+      2. 函数内定义的局部函数（它们不在模块级别，但确实存在）
+    """
+    called = {
         n.func.id
         for n in ast.walk(tree)
         if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
     }
+    # 排除关键字参数名
+    kwargs = set()
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Call):
+            for kw in n.keywords:
+                if kw.arg:
+                    kwargs.add(kw.arg)
+    return called - kwargs
 
 
 def test_no_undefined_module_level_calls():

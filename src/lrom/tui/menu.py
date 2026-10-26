@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 from pathlib import Path
 
 from .. import __version__
@@ -75,6 +76,87 @@ def pause(msg: str = "按回车继续…") -> None:
     except (EOFError, KeyboardInterrupt):
         print()
         raise SystemExit(0)
+
+
+def input_with_redraw(
+    prompt: str,
+    *,
+    redraw,          # callable() -> None，重绘整个菜单
+    interval: float = 1.2,
+) -> str:
+    """带后台重绘的输入。
+
+    问题：菜单顶部显示设备状态，但 input() 会阻塞，
+    期间设备插拔时顶部不会刷新，用户看到的信息是过期的。
+
+    方案：用 select 以小超时轮询 stdin。
+      - 有输入时正常读取
+      - 无输入时每 interval 秒调用一次 redraw()
+      - 重绘时会保留用户已敲入的字符
+
+    只在真实 TTY 上启用；管道/重定向场景退回普通 input()。
+    """
+    import select
+    import sys
+
+    if not sys.stdin.isatty():
+        try:
+            return input(prompt)
+        except (EOFError, KeyboardInterrupt):
+            print()
+            raise SystemExit(0)
+
+    try:
+        import termios
+        import tty
+    except ImportError:  # 非 POSIX
+        try:
+            return input(prompt)
+        except (EOFError, KeyboardInterrupt):
+            print()
+            raise SystemExit(0)
+
+    fd = sys.stdin.fileno()
+    old_attrs = termios.tcgetattr(fd)
+    buf: list[str] = []
+
+    def _render() -> None:
+        # 清屏重画，然后还原提示行与已输入内容
+        redraw()
+        sys.stdout.write(prompt + "".join(buf))
+        sys.stdout.flush()
+
+    try:
+        tty.setcbreak(fd)
+        _render()
+        last = time.time()
+        while True:
+            ready, _, _ = select.select([fd], [], [], 0.2)
+            if ready:
+                ch = os.read(fd, 1).decode("utf-8", errors="ignore")
+                if not ch:
+                    raise EOFError
+                if ch in ("\r", "\n"):
+                    sys.stdout.write("\n")
+                    return "".join(buf)
+                if ch in ("\x7f", "\x08"):  # 退格
+                    if buf:
+                        buf.pop()
+                        _render()
+                    continue
+                if ch == "\x03":  # Ctrl+C
+                    raise KeyboardInterrupt
+                if ch == "\x04":  # Ctrl+D
+                    raise EOFError
+                if ch.isprintable():
+                    buf.append(ch)
+                    sys.stdout.write(ch)
+                    sys.stdout.flush()
+            elif time.time() - last >= interval:
+                last = time.time()
+                _render()
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old_attrs)
 
 
 # ---------------------------------------------------------------------------
@@ -307,19 +389,8 @@ def run_menu() -> int:
     # ── 启动实时设备监测 ──
     mon = DeviceMonitor(interval=1.5)
 
-    def _on_change(snap) -> None:
-        # 状态变化时打印一行提示（不清屏，避免打断用户正在阅读的内容）
-        if snap.present:
-            print(
-                _color(
-                    f"\n  [设备] 已连接 {snap.model or snap.codename} [{snap.mode}]",
-                    C.GREEN,
-                )
-            )
-        else:
-            print(_color("\n  [设备] 已断开连接", C.RED))
-
-    mon.on_change = _on_change
+    # 设备状态变化交给顶部实时重绘处理，不再额外打印提示行
+    # （否则会与重绘叠加，产生重复输出）
     mon.start()
 
     handlers = {
@@ -335,13 +406,18 @@ def run_menu() -> int:
         "10": _menu_about,
     }
 
+    def _draw() -> None:
+        print_header(sess, mon)
+        print(build_menu(sess, env_ok))
+        print()
+
     try:
         while True:
-            print_header(sess, mon)
-            print(build_menu(sess, env_ok))
-            print()
+            _draw()
             try:
-                choice = input(f"  {_color('请选择', C.BOLD)}: ").strip()
+                choice = input_with_redraw(
+                    f"  {_color('请选择', C.BOLD)}: ", redraw=_draw, interval=1.2
+                ).strip()
             except (EOFError, KeyboardInterrupt):
                 print()
                 return 0
