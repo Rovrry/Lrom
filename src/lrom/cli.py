@@ -278,6 +278,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="目标分区（默认 init_boot）",
     )
     pr.add_argument(
+        "--flash-mode",
+        choices=["fastboot", "fastbootd"],
+        default=None,
+        help="刷入模式：fastboot（bootloader，默认）或 fastbootd（用户空间，"
+        "OCDT 损坏时用）；不指定则交互时询问",
+    )
+    pr.add_argument(
         "--kmi",
         default=None,
         help="手动指定 KMI（如 6.1-android14-11），默认按内核版本自动推导",
@@ -299,6 +306,45 @@ def build_parser() -> argparse.ArgumentParser:
     )
     pr.add_argument("--adb-port", type=int, default=None, help="adb server 端口")
     pr.set_defaults(func=cmd_root)
+
+    pm = sub.add_parser(
+        "fetch-manager",
+        help="下载 root 管理器 APK（**唯一的联网命令**）",
+        description=(
+            "从 GitHub Releases 下载最新版本的 root 管理器 APK。\n"
+            "这是 Lrom 唯一会联网的功能：只访问 api.github.com / "
+            "github.com，只下载文件、不执行任何远程代码，"
+            "下载后强制校验 sha256。"
+        ),
+    )
+    pm.add_argument(
+        "--source",
+        choices=["ksu", "ksu-next", "sukisu", "magisk"],
+        default="ksu",
+        help="管理器来源（默认 ksu）",
+    )
+    pm.add_argument(
+        "--channel",
+        choices=["stable", "beta"],
+        default="stable",
+        help="渠道：stable（正式版，默认）或 beta（测试版）",
+    )
+    pm.add_argument(
+        "--dest",
+        default="root-work",
+        help="保存目录（默认 root-work/）",
+    )
+    pm.add_argument(
+        "--asset",
+        default=None,
+        help="手动指定 asset 文件名（自动选择有歧义时使用）",
+    )
+    pm.add_argument(
+        "--yes",
+        action="store_true",
+        help="跳过下载前确认",
+    )
+    pm.set_defaults(func=cmd_fetch_manager)
 
     return p
 
@@ -1041,10 +1087,17 @@ def cmd_root(args: argparse.Namespace) -> int:
         print()
         return 1
 
+    # --- 选择刷入模式（由使用者选择，不替用户判断）---
+    flash_mode = _choose_flash_mode(args.flash_mode)
+
     # --- 生成计划 ---
     method = rt.RootMethod(args.method)
     plan = rt.build_root_plan(
-        image=image, method=method, partition=args.partition, device=device
+        image=image,
+        method=method,
+        partition=args.partition,
+        device=device,
+        flash_mode=flash_mode,
     )
     if args.kmi:
         plan.kmi = args.kmi
@@ -1167,7 +1220,11 @@ def cmd_root(args: argparse.Namespace) -> int:
     print()
     print(paint("  [4/5] 刷入…", C.CYAN))
     ok, detail = rt.flash_patched_image(
-        image=patched, partition=plan.partition, partition_size=plan.partition_size
+        image=patched,
+        partition=plan.partition,
+        partition_size=plan.partition_size,
+        flash_mode=plan.flash_mode,
+        on_notice=lambda msg: print(paint(f"        {msg}", C.YELLOW)),
     )
     if not ok:
         print(paint("  ⛔ 刷写失败：", C.RED))
@@ -1203,8 +1260,144 @@ def cmd_root(args: argparse.Namespace) -> int:
     return 0
 
 
+def _choose_flash_mode(explicit: str | None):
+    """决定刷入模式。未显式指定时交互询问。"""
+    from .core.root import FlashMode
+    from .tui.menu import ask
+
+    if explicit == "fastboot":
+        return FlashMode.FASTBOOT
+    if explicit == "fastbootd":
+        return FlashMode.FASTBOOTD
+
+    print()
+    print(paint("  选择刷入模式：", C.BOLD))
+    print("    [1] Fastboot  （bootloader 模式，常规，默认）")
+    print("    [2] FastbootD （用户空间模式）")
+    print()
+    print(paint("        提示：如果设备的 OCDT 分区被抹掉，bootloader 会进不去，", C.DIM))
+    print(paint("              此时只能选 FastbootD（它由系统里的 fastbootd 服务启动，", C.DIM))
+    print(paint("              不依赖 OCDT）。", C.DIM))
+    print()
+    choice = ask("请选择", "1")
+    print()
+    return FlashMode.FASTBOOTD if choice.strip() == "2" else FlashMode.FASTBOOT
+
+
 def time_str() -> str:
     import time
 
     return time.strftime("%Y%m%d-%H%M%S")
 
+
+
+def cmd_fetch_manager(args: argparse.Namespace) -> int:
+    """下载 root 管理器 APK —— Lrom 唯一的联网命令。"""
+    from .core import manager_fetch as mf
+
+    print()
+    print(paint("╭─ 下载 root 管理器 " + "─" * 40, C.BOLD))
+    print()
+
+    # 联网协议公示（每次都要打，不能只写在文档里）
+    print(paint("  这是 Lrom 唯一会联网的功能。承诺如下：", C.BOLD))
+    print("    · 只访问 api.github.com / github.com / objects.githubusercontent.com")
+    print("    · 只下载文件，绝不执行任何远程代码或脚本")
+    print("    · 下载后强制校验 sha256，不匹配立即丢弃")
+    print("    · 不发送任何设备信息、序列号或统计（零遥测）")
+    print()
+
+    try:
+        source = mf.resolve_manager_source(args.source)
+    except mf.FetchError as exc:
+        print(paint(f"  ⛔ {exc}", C.RED))
+        print()
+        return 1
+
+    channel_label = "正式版" if args.channel == "stable" else "测试版"
+    print(f"  来源  : {source.label}  ({source.repo})")
+    print(f"  渠道  : {channel_label}")
+    print()
+
+    print(paint("  正在查询最新版本…", C.CYAN))
+    try:
+        release = mf.fetch_latest_release(source, channel=args.channel)
+    except mf.FetchError as exc:
+        print(paint(f"  ⛔ {exc}", C.RED))
+        print()
+        return 1
+
+    tag_line = release.tag
+    if release.prerelease:
+        tag_line += paint("  (预发布)", C.YELLOW)
+    print(f"  最新版本: {tag_line}")
+    if release.published_at:
+        print(f"  发布时间: {release.published_at}")
+    print()
+
+    try:
+        if args.asset:
+            asset = next(
+                (a for a in release.assets if a.name == args.asset), None
+            )
+            if asset is None:
+                names = ", ".join(a.name for a in release.assets)
+                raise mf.FetchError(
+                    f"Release 里没有 {args.asset!r}。可用：{names}"
+                )
+        else:
+            asset = mf.pick_asset(release, source)
+    except mf.FetchError as exc:
+        print(paint(f"  ⛔ {exc}", C.RED))
+        print()
+        return 1
+
+    digest = asset.sha256
+    print(f"  文件  : {asset.name}")
+    print(f"  大小  : {asset.size:,} 字节 ({asset.size / 1024 / 1024:.1f} MB)")
+    print(f"  sha256: {digest or paint('（未提供，将拒绝下载）', C.RED)}")
+    print()
+
+    if not args.yes:
+        from .tui.menu import confirm
+
+        if not confirm("确认下载？"):
+            print("\n  已取消。\n")
+            return 0
+
+    dest = Path(args.dest)
+    print()
+    print(paint(f"  下载到 {dest}/ …", C.CYAN))
+
+    last = {"pct": -1}
+
+    def on_progress(done: int, total: int) -> None:
+        if total <= 0:
+            return
+        pct = int(done * 100 / total)
+        if pct != last["pct"]:
+            last["pct"] = pct
+            print(f"\r        {pct:3d}%  ({done:,}/{total:,})", end="", flush=True)
+
+    try:
+        path = mf.download_asset(
+            asset, dest, expected_sha256=digest, on_progress=on_progress
+        )
+    except mf.FetchError as exc:
+        print()
+        print(paint(f"  ⛔ {exc}", C.RED))
+        print()
+        return 1
+
+    print("\r" + " " * 50 + "\r", end="")
+    print(paint("  ✓ 下载完成，校验通过", C.GREEN))
+    print()
+    print(f"  {path}")
+    print()
+    print("  安装到设备：")
+    print(paint(f"    adb install -r {path}", C.CYAN))
+    print()
+    print("  或用 APP 方式跑 root（会自动推开安装提示）：")
+    print(paint(f"    ./lrom root --method app", C.CYAN))
+    print()
+    return 0

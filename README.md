@@ -123,6 +123,7 @@ lrom flash ~/Downloads/rom.zip --images unpacked/rom
 | `lrom arb` | ARB 熔断检测 |
 | `lrom flash <包>` | 执行刷写 |
 | `lrom root` | 自动化 root（patch init_boot） |
+| `lrom fetch-manager` | 下载 root 管理器 APK（**唯一联网命令**） |
 
 ### 自动化 root
 
@@ -137,11 +138,43 @@ lrom flash ~/Downloads/rom.zip --images unpacked/rom
 `--method ksud` 需要自行准备 [ksud](https://github.com/tiann/KernelSU/releases)
 （Lrom 不捆绑，保持零依赖），放到 PATH 或用 `LROM_KSUD=/path/to/ksud` 指定。
 
+刷入模式**由你选择**：
+
+```bash
+./lrom root --flash-mode fastboot    # bootloader 模式（常规）
+./lrom root --flash-mode fastbootd   # 用户空间模式
+./lrom root                          # 不指定则交互询问
+```
+
+> **什么时候需要 fastbootd**：如果 OCDT 分区被恶意脚本抹掉，
+> bootloader 会进不去、fastboot 完全不可用。fastbootd 由系统里的
+> 用户空间服务启动、不依赖 OCDT，此时是唯一还能刷写的通道。
+
+下载 root 管理器（唯一联网命令，支持正式版/测试版，多来源）：
+
+```bash
+./lrom fetch-manager --source ksu --channel stable   # KernelSU 正式版
+./lrom fetch-manager --source ksu --channel beta     # KernelSU 测试版
+adb install -r root-work/KernelSU_*.apk
+```
+
+来源可选 `ksu` / `ksu-next` / `sukisu` / `magisk`，始终取 GitHub 最新发布。
+
 失败可随时恢复，`lrom root` 会在刷写前把原厂镜像存到 `root-work/`：
 
 ```bash
 fastboot flash init_boot root-work/init_boot-stock-<时间>.img
 ```
+
+### 联网说明
+
+Lrom 除 `fetch-manager` 外**不发起任何网络请求**。该命令的约束：
+
+- 只访问 `api.github.com` / `github.com` / `objects.githubusercontent.com`
+- 强制 HTTPS，不降级
+- 下载后强制校验 sha256，不匹配立即丢弃文件
+- 只下载文件，**绝不执行任何远程代码**
+- 不发送任何设备信息或统计（零遥测）
 
 
 ### 关键参数
@@ -287,7 +320,8 @@ pip install -e ".[dev]"
 | `test_flash.py` | 刷写流程、失败中止、关键分区跳过 |
 | `test_arb.py` | ARB 解析与降级拦截 |
 | `test_bootimg.py` | boot image 解析、ramdisk 检查、AVB footer |
-| `test_root.py` | KMI 推导、root 计划、原厂留存、patch 后校验 |
+| `test_root.py` | KMI 推导、root 计划、原厂留存、patch 后校验、刷入模式 |
+| `test_manager_fetch.py` | 联网协议：域名/HTTPS 白名单、摘要校验 |
 
 ## 许可证
 

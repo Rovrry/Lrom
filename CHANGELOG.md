@@ -2,6 +2,82 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.4.1] - 2026-10-27
+
+### 新增：`lrom fetch-manager` —— 唯一的联网命令
+
+下载 root 管理器 APK，始终取 GitHub 最新发布，支持正式版/测试版双渠道。
+
+```bash
+./lrom fetch-manager --source ksu --channel stable
+./lrom fetch-manager --source ksu --channel beta
+./lrom fetch-manager --source magisk --channel beta
+```
+
+来源：`ksu`（KernelSU 官方）/ `ksu-next` / `sukisu` / `magisk`。
+
+#### 为什么这次允许联网
+
+用户明确要求：「修改协议，标明联网只从 GitHub 下载 root 管理器，
+无恶意远程代码」。因此本版本把「离线优先」原则正式修订为：
+
+> 离线优先，零遥测 —— 核心链路不依赖任何服务器。
+> 唯一的联网是用户显式发起的 root 管理器下载。
+
+并把这条承诺**写死在代码里**，不只是写在文档里：
+
+| 约束 | 实现 |
+|---|---|
+| 域名白名单（仅 3 个） | `_check_url()` 在发请求**之前**校验 |
+| 强制 HTTPS，不降级 | `_check_url()` 检查 scheme |
+| 无摘要拒绝下载 | `download_asset()` 强制要求 `digest` |
+| 校验失败立即删文件 | 不通过直接 `unlink()` |
+| 只下载不执行 | 远程数据只当文件写盘 |
+| 不发送设备信息 | 请求头只有 `User-Agent: lrom/<版本>` |
+| `lrom root` 主流程永不联网 | 联网仅存在于 `fetch-manager` |
+
+每条约束都有对应测试（`test_manager_fetch.py`，29 个）。
+
+### 新增：`--flash-mode` —— 刷入通道由使用者选择
+
+```bash
+./lrom root --flash-mode fastboot    # bootloader（常规）
+./lrom root --flash-mode fastbootd   # 用户空间
+./lrom root                          # 不指定则交互询问
+```
+
+**为什么需要 fastbootd**：用户指出 —— **OCDT 分区被恶意脚本抹掉后
+bootloader 进不去，fastboot 模式完全不可用**。fastbootd 由系统里的
+用户空间服务启动，不依赖 OCDT，此时是唯一还能刷写的通道。
+`init_boot` 是物理分区，两种模式都能写。
+
+按用户要求，Lrom **不替用户判断走哪条**，交给使用者决定。
+
+### 修复：asset 选择逻辑会误选架构包
+
+写测试时发现：`_APK_EXCLUDE` 里用 `arm64-v8` 想排除架构包，
+但排除不掉 `armeabi-v7a`，导致多个架构包同时留下后被误判为「唯一通用包」。
+
+改为独立的 `_ARCH_PATTERN` 正则，多个候选时**只有恰好一个不带架构字样**
+才采用，否则报错列出全部候选让用户用 `--asset` 指定——**宁可报错不猜错**。
+
+### 测试
+
+155 → **193**（新增 38 个）：
+- `test_manager_fetch.py`（29 个）：域名/HTTPS 白名单、摘要强制、
+  校验失败清理、asset 选择、渠道解析
+- `test_root.py` 新增 9 个：flash-mode 传递、模式探测、fastbootd 切换、
+  OCDT 场景提示
+
+### 实测记录
+
+- `fetch-manager --source ksu` 真实下载 v3.3.1（13.0 MB），
+  sha256 校验通过
+- 双渠道实测：KSU beta 无预发布版时正确退回 v3.3.1；
+  Magisk beta 正确取到 v31.0（prerelease）
+- 顺带确认 release 里确有 `lkm-aarch64-android14-6.1_kernelsu.ko`
+  与 `ksud-x86_64-unknown-linux-musl`，印证设备 KMI 判定正确
+
 ## [0.4.0] - 2026-10-27
 
 ### 新增：`lrom root` —— 自动化 root

@@ -296,3 +296,128 @@ def test_verify_handles_missing_patched_file(tmp_path: Path):
     )
     assert ok is False
     assert any("不存在" in p for p in problems)
+
+
+# ---------------------------------------------------------------------------
+# 刷入模式（fastboot / fastbootd）
+# ---------------------------------------------------------------------------
+
+
+def test_flash_mode_labels():
+    from lrom.core.root import FlashMode
+
+    assert FlashMode.FASTBOOT.value == "fastboot"
+    assert FlashMode.FASTBOOTD.value == "fastbootd"
+    assert "bootloader" in FlashMode.FASTBOOT.label
+    assert "用户空间" in FlashMode.FASTBOOTD.label
+
+
+def test_plan_carries_flash_mode(tmp_path: Path):
+    from lrom.core.root import FlashMode
+
+    img = tmp_path / "init_boot.img"
+    img.write_bytes(make_boot_v4(ramdisk_size=8192))
+
+    plan = build_root_plan(
+        image=img,
+        method=RootMethod.APP,
+        device=FakeDevice(),
+        flash_mode=FlashMode.FASTBOOTD,
+    )
+    assert plan.flash_mode is FlashMode.FASTBOOTD
+    assert "FastbootD" in plan.describe()
+
+
+def test_plan_defaults_to_fastboot(tmp_path: Path):
+    from lrom.core.root import FlashMode
+
+    img = tmp_path / "init_boot.img"
+    img.write_bytes(make_boot_v4(ramdisk_size=8192))
+
+    plan = build_root_plan(image=img, method=RootMethod.APP, device=FakeDevice())
+    assert plan.flash_mode is FlashMode.FASTBOOT
+
+
+class FakeFastboot:
+    """模拟 fastboot，用于测试模式探测与切换。"""
+
+    def __init__(self, *, devices, is_user_space, reboot_ok=True):
+        self._devices = devices
+        self._is_user_space = is_user_space
+        self._reboot_ok = reboot_ok
+        self.calls = []
+
+    def devices(self):
+        return ["serial1"] if self._devices else []
+
+    def is_fastbootd(self):
+        return self._is_user_space
+
+    def run(self, *args, timeout=None):
+        self.calls.append(args)
+
+        class R:
+            exit_code = 0
+            timed_out = False
+            stdout = ""
+            stderr = ""
+            combined = "OKAY"
+
+        if args[:2] == ("reboot", "fastboot") and self._reboot_ok:
+            # 模拟切换成功
+            self._is_user_space = True
+        return R()
+
+    def ok(self, result):
+        return True
+
+
+def test_detect_fastboot_mode_none():
+    from lrom.core.root import detect_fastboot_mode
+
+    fb = FakeFastboot(devices=False, is_user_space=False)
+    assert detect_fastboot_mode(fb) == "none"
+
+
+def test_detect_fastboot_mode_fastboot():
+    from lrom.core.root import detect_fastboot_mode
+
+    fb = FakeFastboot(devices=True, is_user_space=False)
+    assert detect_fastboot_mode(fb) == "fastboot"
+
+
+def test_detect_fastboot_mode_fastbootd():
+    from lrom.core.root import detect_fastboot_mode
+
+    fb = FakeFastboot(devices=True, is_user_space=True)
+    assert detect_fastboot_mode(fb) == "fastbootd"
+
+
+def test_enter_fastbootd_already_there():
+    from lrom.core.root import enter_fastbootd
+
+    fb = FakeFastboot(devices=True, is_user_space=True)
+    ok, msg = enter_fastbootd(fastboot=fb)
+    assert ok is True
+    assert "已在" in msg
+    # 不应触发 reboot
+    assert not any(c[:2] == ("reboot", "fastboot") for c in fb.calls)
+
+
+def test_enter_fastbootd_switches():
+    from lrom.core.root import enter_fastbootd
+
+    fb = FakeFastboot(devices=True, is_user_space=False)
+    ok, msg = enter_fastbootd(fastboot=fb, timeout=10)
+    assert ok is True
+    assert any(c[:2] == ("reboot", "fastboot") for c in fb.calls)
+
+
+def test_enter_fastbootd_no_device_gives_ocdt_hint():
+    """没有 fastboot 设备时，提示里要点明 OCDT 场景的绕行办法。"""
+    from lrom.core.root import enter_fastbootd
+
+    fb = FakeFastboot(devices=False, is_user_space=False)
+    ok, msg = enter_fastbootd(fastboot=fb, timeout=5)
+    assert ok is False
+    assert "adb reboot fastboot" in msg

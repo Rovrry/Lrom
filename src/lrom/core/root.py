@@ -7,7 +7,8 @@
      - 任何一步失败立即中止，不猜、不硬闯
   2. **离线优先**
      - 所有素材来自本地：ROM 包解出的 init_boot.img + 本机放置的 ksud
-     - 唯一的外部产物是用户自己下载的 ksud / Manager APK，Lrom 不联网
+     - root 主流程**永不联网**；联网只在用户显式执行
+       ``lrom root fetch-manager`` 时发生（见 manager_fetch.py）
   3. **先出计划，后执行**
      - 每个写设备动作都要经过 plan → 用户确认 → 执行
   4. **永不自动重启设备**
@@ -18,6 +19,16 @@
     纯命令行、可全自动，推荐。
   - ``app``：把 init_boot 推到设备，引导用户用 KernelSU / Magisk
     Manager APP 手工 patch，再拉回来刷入。适合没有 ksud 的情况。
+
+两种刷入模式（对应 --flash-mode，**由使用者选择**）：
+  - ``fastboot``：bootloader 模式，常规路径，最快最稳。
+  - ``fastbootd``：用户空间 fastboot（recovery 里的 fastbootd 服务）。
+
+    为什么需要 fastbootd：**OCDT 分区被恶意脚本抹掉后，
+    bootloader 进不去，fastboot 模式完全不可用**。但 fastbootd 由
+    用户空间的 fastbootd 服务启动，不依赖 OCDT，此时是**唯一还能
+    刷写的通道**。init_boot 是物理分区，两种模式都能写。
+    Lrom 不替用户判断走哪条，交给使用者决定。
 
 关于本机实测得到的几个硬事实（写代码时务必遵守）：
   - 目标分区是 **init_boot**，不是 boot（boot 的 ramdisk_size = 0）
@@ -45,6 +56,7 @@ from .bootimg import BootImageError, check_ramdisk, parse_boot_image
 
 __all__ = [
     "RootMethod",
+    "FlashMode",
     "RootPlan",
     "PatchResult",
     "derive_kmi",
@@ -54,6 +66,8 @@ __all__ = [
     "push_for_app_patch",
     "pull_app_patched",
     "flash_patched_image",
+    "detect_fastboot_mode",
+    "enter_fastbootd",
     "ROOT_PARTITION_CANDIDATES",
 ]
 
@@ -65,6 +79,25 @@ ROOT_PARTITION_CANDIDATES = ("init_boot", "boot")
 class RootMethod(Enum):
     KSUD = "ksud"
     APP = "app"
+
+
+class FlashMode(Enum):
+    """刷入模式 —— 由使用者选择，Lrom 不替用户判断。
+
+    FASTBOOT : bootloader 模式，常规路径。
+    FASTBOOTD: 用户空间 fastboot。OCDT 被抹掉导致 bootloader 进不去时，
+               这是唯一还能刷写的通道。
+    """
+
+    FASTBOOT = "fastboot"
+    FASTBOOTD = "fastbootd"
+
+    @property
+    def label(self) -> str:
+        return {
+            FlashMode.FASTBOOT: "Fastboot（bootloader 模式）",
+            FlashMode.FASTBOOTD: "FastbootD（用户空间模式）",
+        }[self]
 
 
 class RootError(Exception):
@@ -132,6 +165,7 @@ class RootPlan:
     kmi: str | None = None
     kernel_release: str | None = None
     ksud_path: str | None = None
+    flash_mode: FlashMode = FlashMode.FASTBOOT
     # 阻塞项：非空则不可执行
     blockers: list[str] = field(default_factory=list)
     # 警告项：可执行但需用户知晓
@@ -149,6 +183,7 @@ class RootPlan:
         lines.append("=" * 60)
         lines.append("")
         lines.append(f"  方式      : {self.method.value}")
+        lines.append(f"  刷入模式  : {self.flash_mode.label}")
         lines.append(f"  目标分区  : {self.partition}")
         if self.slot:
             lines.append(f"  当前槽位  : {self.slot}")
@@ -215,6 +250,7 @@ def build_root_plan(
     partition: str | None = None,
     device=None,
     fastboot: FastbootRunner | None = None,
+    flash_mode: FlashMode = FlashMode.FASTBOOT,
 ) -> RootPlan:
     """生成 root 计划，不写设备、不改文件。
 
@@ -232,6 +268,7 @@ def build_root_plan(
         source_image=image,
         serial=getattr(device, "serial", None),
         slot=getattr(device, "slot", None),
+        flash_mode=flash_mode,
     )
 
     # --- 1. 镜像基础检查 ---
@@ -548,10 +585,103 @@ def flash_patched_image(
     partition: str,
     partition_size: int = 0,
     fastboot: FastbootRunner | None = None,
+    flash_mode: FlashMode = FlashMode.FASTBOOT,
+    on_notice=None,
 ) -> tuple[bool, str]:
-    """刷入 patch 后的镜像。调用前必须已通过 verify_patched_image。"""
+    """刷入 patch 后的镜像。调用前必须已通过 verify_patched_image。
+
+    Args:
+        flash_mode: FASTBOOT 直连 bootloader；FASTBOOTD 先在用户空间
+            fastbootd 里刷（OCDT 损坏时唯一可行路径）。
+        on_notice: 提示回调（模式切换、等待用户操作等）。
+    """
     fastboot = fastboot or FastbootRunner()
+
+    if flash_mode is FlashMode.FASTBOOTD:
+        ok, detail = enter_fastbootd(fastboot=fastboot, on_notice=on_notice)
+        if not ok:
+            return False, detail
+
     res = fastboot.run("flash", partition, str(image), timeout=600)
     if not fastboot.ok(res):
         return False, res.combined.strip()
     return True, "刷写完成"
+
+
+def detect_fastboot_mode(fastboot: FastbootRunner | None = None) -> str:
+    """探测当前处于 fastboot 还是 fastbootd。
+
+    返回 ``"fastboot"`` / ``"fastbootd"`` / ``"none"``。
+    """
+    fastboot = fastboot or FastbootRunner()
+    try:
+        if not fastboot.devices():
+            return "none"
+        return "fastbootd" if fastboot.is_fastbootd() else "fastboot"
+    except Exception:  # noqa: BLE001
+        return "none"
+
+
+def enter_fastbootd(
+    *,
+    fastboot: FastbootRunner | None = None,
+    timeout: float = 180.0,
+    on_notice=None,
+) -> tuple[bool, str]:
+    """进入 fastbootd 用户空间模式。
+
+    为什么可能需要它：**OCDT 分区被恶意脚本抹掉后，bootloader 进不去，
+    fastboot 模式完全不可用**。fastbootd 由用户空间的 fastbootd 服务
+    启动，不依赖 OCDT，是这种情况下唯一还能刷写的通道。
+
+    注意（本项目踩过的坑）：OPLUS 设备的 fastbootd 可能停在语言选择
+    界面，需要用户手动点选，所以等待期间会给出提示。
+    """
+    fastboot = fastboot or FastbootRunner()
+
+    current = detect_fastboot_mode(fastboot)
+    if current == "fastbootd":
+        return True, "已在 FastbootD 模式。"
+    if current == "none":
+        return False, (
+            "未检测到 fastboot 设备。\n"
+            "  · 如果设备在开机状态，先执行 adb reboot bootloader\n"
+            "  · 如果 bootloader 进不去（如 OCDT 被抹），\n"
+            "    需要在系统里开启「USB 调试」后执行：\n"
+            "      adb reboot fastboot\n"
+            "    这样会直接进入 FastbootD，绕过 bootloader。"
+        )
+
+    if on_notice:
+        on_notice("正在切换到 FastbootD 模式…")
+
+    res = fastboot.run("reboot", "fastboot", timeout=60)
+    if not fastboot.ok(res):
+        return False, f"切换 FastbootD 失败：{res.combined.strip()}"
+
+    start = time.time()
+    hinted = False
+    while time.time() - start < timeout:
+        time.sleep(3)
+        try:
+            if not fastboot.devices():
+                continue
+            if fastboot.is_fastbootd():
+                time.sleep(2)
+                return True, "已进入 FastbootD 模式。"
+        except Exception:  # noqa: BLE001
+            pass
+
+        if time.time() - start > 20 and not hinted and on_notice:
+            hinted = True
+            on_notice(
+                "正在等待 FastbootD…如果手机屏幕出现语言选择界面，请手动点选。"
+            )
+
+    return False, (
+        f"等待 FastbootD 超时（{int(timeout)} 秒）。\n"
+        "请检查：\n"
+        "  · 手机是否停在语言选择界面？点选后重试\n"
+        "  · 设备是否支持 fastbootd？（部分老设备没有）\n"
+        "  · 可以改用 --flash-mode fastboot 走 bootloader 模式"
+    )
