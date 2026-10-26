@@ -251,6 +251,55 @@ def build_parser() -> argparse.ArgumentParser:
     pa.add_argument("--adb-port", type=int, default=None, help="adb server 端口")
     pa.set_defaults(func=cmd_arb)
 
+    pr = sub.add_parser(
+        "root",
+        help="自动化 root（patch init_boot 建立 root）",
+        description=(
+            "自动化 root。默认用 ksud 在 PC 侧 patch init_boot，"
+            "校验后刷入，最后停下等你手动重启。"
+        ),
+    )
+    pr.add_argument(
+        "-i",
+        "--image",
+        type=Path,
+        default=None,
+        help="原厂 init_boot.img 路径（默认自动在 unpacked/rom 里找）",
+    )
+    pr.add_argument(
+        "--method",
+        choices=["ksud", "app"],
+        default="ksud",
+        help="patch 方式：ksud（全自动，推荐）或 app（用手机上的 Manager 修补）",
+    )
+    pr.add_argument(
+        "--partition",
+        default=None,
+        help="目标分区（默认 init_boot）",
+    )
+    pr.add_argument(
+        "--kmi",
+        default=None,
+        help="手动指定 KMI（如 6.1-android14-11），默认按内核版本自动推导",
+    )
+    pr.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="只生成计划，不 patch、不写设备",
+    )
+    pr.add_argument(
+        "--yes",
+        action="store_true",
+        help="跳过确认（危险，不推荐）",
+    )
+    pr.add_argument(
+        "--workdir",
+        default="root-work",
+        help="工作目录，存放 patch 产物与原厂底图（默认 root-work/）",
+    )
+    pr.add_argument("--adb-port", type=int, default=None, help="adb server 端口")
+    pr.set_defaults(func=cmd_root)
+
     return p
 
 
@@ -933,3 +982,229 @@ def cmd_selfcheck(args: argparse.Namespace) -> int:
     from .device.selfcheck import Level
 
     return 1 if any(i.level is Level.ERROR for i in items) else 0
+
+
+def _find_stock_image(explicit: Path | None) -> Path | None:
+    """定位原厂 init_boot.img。
+
+    优先级：
+      1. 用户显式指定
+      2. unpacked/rom/init_boot.img（全量包解出的，版本最可靠）
+      3. unpacked/rom/boot.img（老设备，但会因无 ramdisk 被拦下）
+    """
+    if explicit:
+        return Path(explicit)
+    for cand in ("unpacked/rom/init_boot.img", "unpacked/rom/boot.img"):
+        p = Path(cand)
+        if p.is_file():
+            return p
+    return None
+
+
+def cmd_root(args: argparse.Namespace) -> int:
+    """自动化 root。"""
+    from .core import root as rt
+    from .device.discover import DeviceMode, detect
+
+    print()
+    print(paint("╭─ 自动化 Root " + "─" * 46, C.BOLD))
+    print()
+
+    # --- 定位镜像 ---
+    image = _find_stock_image(args.image)
+    if image is None:
+        print(paint("  ⛔ 找不到原厂镜像。", C.RED))
+        print()
+        print("  请先从全量 ROM 包解出 init_boot：")
+        print(f"    {paint('./lrom unpack <ROM包> --partitions init_boot', C.CYAN)}")
+        print("  或用 -i 指定 init_boot.img 路径。")
+        print()
+        return 1
+
+    # --- 设备状态 ---
+    device = detect(adb_server_port=args.adb_port)
+    if device is None:
+        print(paint("  ⛔ 未检测到设备。", C.RED))
+        print("  请先连接设备并确认能识别（./lrom devices）。")
+        print()
+        return 1
+
+    if device.mode is DeviceMode.FASTBOOT or device.mode is DeviceMode.FASTBOOTD:
+        print(paint("  ⚠ 设备当前在 fastboot 模式。", C.YELLOW))
+        print("  root 流程需要先读取设备信息，请开机启动后再运行。")
+        print()
+        return 1
+
+    if device.locked is not None and str(device.locked) != "0":
+        print(paint("  ⛔ Bootloader 未解锁，无法刷写。", C.RED))
+        print("  请先在开发者选项里执行 OEM 解锁。")
+        print()
+        return 1
+
+    # --- 生成计划 ---
+    method = rt.RootMethod(args.method)
+    plan = rt.build_root_plan(
+        image=image, method=method, partition=args.partition, device=device
+    )
+    if args.kmi:
+        plan.kmi = args.kmi
+
+    print(plan.describe())
+
+    if not plan.can_proceed:
+        print(paint("  存在阻止执行的问题，已停止。", C.RED))
+        print()
+        return 1
+
+    if args.dry_run:
+        print(paint("  这是预演（--dry-run），未做任何修改。", C.YELLOW))
+        print()
+        return 0
+
+    # --- 确认 ---
+    if not args.yes:
+        from .tui.menu import confirm
+
+        if not confirm(
+            f"确认 patch 并刷入 {plan.partition}？（原厂镜像会先备份）"
+        ):
+            print("\n  已取消。\n")
+            return 0
+
+    workdir = Path(args.workdir)
+    workdir.mkdir(parents=True, exist_ok=True)
+
+    # --- 步骤 1：先留存原厂底图（回滚基础，必须在任何写操作之前）---
+    print()
+    print(paint("  [1/5] 留存原厂镜像…", C.CYAN))
+    try:
+        stock_copy = rt.save_stock_image(
+            image, workdir=workdir, partition=plan.partition
+        )
+    except OSError as exc:
+        print(paint(f"  ⛔ 保存原厂镜像失败：{exc}", C.RED))
+        print("  为安全起见已中止（没有底图就不刷写）。")
+        print()
+        return 1
+    print(f"        {stock_copy}")
+    print(f"        sha256 {plan.stock_sha256[:32]}…")
+
+    # --- 步骤 2：patch ---
+    print()
+    patched: Path | None = None
+
+    if method is rt.RootMethod.KSUD:
+        print(paint("  [2/5] 用 ksud patch 镜像…", C.CYAN))
+        out = workdir / f"{plan.partition}-patched-{time_str()}.img"
+        result = rt.patch_with_ksud(
+            image=image,
+            output=out,
+            ksud=plan.ksud_path,
+            kmi=plan.kmi,
+            on_line=lambda s: None,
+        )
+        if not result.ok:
+            print(paint(f"  ⛔ {result.message}", C.RED))
+            print()
+            return 1
+        patched = result.output
+        print(f"        产出 {patched}")
+    else:
+        from .device.runner import AdbRunner
+
+        print(paint("  [2/5] 推送镜像到设备…", C.CYAN))
+        adb = AdbRunner(server_port=args.adb_port)
+        try:
+            remote = rt.push_for_app_patch(image=image, adb=adb)
+        except rt.RootError as exc:
+            print(paint(f"  ⛔ {exc}", C.RED))
+            print()
+            return 1
+        print(f"        已推送到 {remote}")
+        print()
+        print(paint("  请现在在手机上操作：", C.BOLD))
+        print("    1. 安装 KernelSU Manager（或 Magisk）APK")
+        print(f"    2. 打开后选择「安装 / Install」→「选择文件 / Select a file」")
+        print(f"    3. 选中 {remote}")
+        print("    4. 等待修补完成，确认已导出到 Download 目录")
+        print()
+        try:
+            input(paint("  修补完成后按回车继续…", C.DIM))
+        except (EOFError, KeyboardInterrupt):
+            print("\n  已取消。\n")
+            return 130
+
+        print(paint("  [2b/5] 拉回修补后的镜像…", C.CYAN))
+        try:
+            patched = rt.pull_app_patched(dest_dir=workdir, adb=adb)
+        except rt.RootError as exc:
+            print(paint(f"  ⛔ {exc}", C.RED))
+            print()
+            return 1
+        if patched is None:
+            print(paint("  ⛔ 没在设备上找到修补后的镜像。", C.RED))
+            print("  请确认 Manager 已导出 .img 到 Download 目录。")
+            print()
+            return 1
+        print(f"        已拉回 {patched}")
+
+    # --- 步骤 3：校验 ---
+    print()
+    print(paint("  [3/5] 校验 patch 结果…", C.CYAN))
+    ok, problems = rt.verify_patched_image(
+        stock=image, patched=patched, partition_size=plan.partition_size
+    )
+    if not ok:
+        print(paint("  ⛔ 校验未通过，已中止（不会刷入）：", C.RED))
+        for p in problems:
+            print(f"        - {p}")
+        print()
+        return 1
+    print("        ✓ 大小、header、ramdisk、AVB footer 均正常")
+    print(f"        sha256 {rt._sha256(patched)[:32]}…")
+
+    # --- 步骤 4：刷写 ---
+    print()
+    print(paint("  [4/5] 刷入…", C.CYAN))
+    ok, detail = rt.flash_patched_image(
+        image=patched, partition=plan.partition, partition_size=plan.partition_size
+    )
+    if not ok:
+        print(paint("  ⛔ 刷写失败：", C.RED))
+        print(f"    {detail}")
+        print()
+        print("  原厂镜像已保存在：")
+        print(f"    {stock_copy}")
+        print()
+        print("  可以这样恢复：")
+        print(
+            paint(
+                f"    fastboot flash {plan.partition} {stock_copy}",
+                C.CYAN,
+            )
+        )
+        print()
+        return 1
+    print("        ✓ 刷写完成")
+
+    # --- 步骤 5：收尾（永不自动重启）---
+    print()
+    print(paint("  [5/5] 完成", C.GREEN + C.BOLD))
+    print()
+    print("  请手动重启设备：")
+    print(paint("    fastboot reboot", C.CYAN))
+    print()
+    print("  重启后验证 root：")
+    print(paint("    adb shell su -c id", C.CYAN))
+    print()
+    print("  出问题可随时用原厂镜像恢复：")
+    print(paint(f"    fastboot flash {plan.partition} {stock_copy}", C.CYAN))
+    print()
+    return 0
+
+
+def time_str() -> str:
+    import time
+
+    return time.strftime("%Y%m%d-%H%M%S")
+

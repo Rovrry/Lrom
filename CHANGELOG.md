@@ -2,6 +2,136 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.4.0] - 2026-10-27
+
+### 新增：`lrom root` —— 自动化 root
+
+用全量包里已有的 `init_boot.img` 建立 root。**整个流程离线、不联网**。
+
+```bash
+./lrom root --dry-run              # 先看计划
+./lrom root                        # ksud 方式，全自动
+./lrom root --method app           # 用手机上的 Manager APP 修补
+```
+
+#### 背景：为什么会踩「静默失败」的坑
+
+Magisk 的 `boot_patch.sh` 在找不到 ramdisk 时**不报错**，
+而是从零造一个空 ramdisk：
+
+```sh
+else
+  # No ramdisk found, create one from scratch
+  RAMDISK=ramdisk.cpio
+```
+
+结果是 **patch 显示成功、fastboot 刷入显示 OK、开机也正常，但完全没有 root**。
+
+而本项目的目标设备 `boot.img` 的 `ramdisk_size` 实测就是 **0**
+（GKI 2.0 起通用 ramdisk 移到了 `init_boot`）。照着网上教程去
+patch `boot.img` 必然掉进这个坑。
+
+**`lrom root` 的第一件事就是把这种镜像拦下来**，
+并明确告诉你应该改用 `init_boot`。
+
+#### 新增模块
+
+**`core/bootimg.py`** —— boot image 只读解析
+- 支持 header v0–v4（v0–v2 按 page_size 对齐，v3–v4 固定 4096）
+- 识别 ramdisk 压缩格式：gzip / lz4_legacy / lz4_frame / xz / lzma / zstd / cpio
+- 识别 AVB footer 与镜像逻辑长度
+- `vendor_boot` 明确拒绝（不支持直接 patch）
+
+**`core/root.py`** —— root 流程
+- `derive_kmi()`：从内核版本推导 KMI
+- `build_root_plan()`：生成可审阅的计划
+- `save_stock_image()`：原厂镜像留存 + 清单
+- `patch_with_ksud()` / `push_for_app_patch()` / `pull_app_patched()`
+- `verify_patched_image()`：刷前校验
+- `flash_patched_image()`：复用 `FastbootRunner` 的严格判定
+
+#### 安全设计（对应四条铁律）
+
+| 原则 | 落实 |
+|---|---|
+| 不砖机 > 功能多 | patch 前强制查 ramdisk；刷前强制校验；**留存原厂镜像在刷写之前** |
+| 离线优先 | 素材全部来自本地，Lrom 不联网下载任何东西 |
+| 先出计划后执行 | 每个写设备动作都先出计划 → 确认 → 执行，支持 `--dry-run` |
+| 永不自动重启 | 刷完后停下，打印手动重启命令 |
+
+失败时自动打印恢复命令：
+`fastboot flash init_boot root-work/init_boot-stock-<时间>.img`
+
+#### 关键：KMI 必须按内核版本推导，不能按 Android 版本
+
+本机设备是 **Android 16**，但内核是 `6.1.141-android14-11-o-...`，
+所以 KMI 是 **`6.1-android14-11`**，不是 `android16-6.12`。
+
+内核版本跟随设备**出厂**时的 Android，后续 OTA 不会改内核。
+选错 KMI 必然安装失败——社区已有一加平板 A16 试错两轮的实例。
+
+`lrom root` 会自动读 `uname -r` 推导，也可 `--kmi` 手动覆盖。
+
+#### ksud 不打包
+
+`ksud` 是 KernelSU 官方提供的命令行 patch 工具，Lrom **不捆绑**它
+（保持零依赖、免安装）。按现有 `adb`/`fastboot` 的同一套机制查找：
+
+1. 环境变量 `LROM_KSUD`
+2. 配置文件 `~/.config/lrom/config.json`
+3. 系统 PATH
+4. 常见目录
+
+下载：https://github.com/tiann/KernelSU/releases
+
+#### 实测记录（2026-10-27，OnePlus OPD2404 / Android 16）
+
+在做功能前的**探测实验**中确认：
+
+| 项 | 结果 |
+|---|---|
+| 改过内容的 `init_boot` 能否启动 | ✅ 正常开机（30 秒） |
+| `verifiedbootstate` | `orange`（未变红、未拒绝） |
+| 是否需要动 `vbmeta` | ❌ 不需要 |
+| `init_boot` 是否锁区 | ✅ 可正常刷写 |
+| `fastboot fetch` | ❌ 设备不支持，回滚底图改从 ROM 包取 |
+
+结论：**已解锁设备改 `init_boot` 后能正常启动，AVB 不拦截**。
+这是此前最大的未知项，现在有真机实证。
+
+#### 另一个实测发现：`backups/` 里的 init_boot 不是原厂
+
+对比两份镜像的 CPIO 内容：
+
+```
+backups/.../init_boot.img   → 多出 kernelsu.ko / ksu_config / init.real
+                              init 从 3MB 缩到 603KB
+unpacked/rom/init_boot.img  → 21 个标准 ramdisk 条目，无 KSU 痕迹
+```
+
+即 `backups/` 那份**本身是一次 KSU patch 的产物**，且其中的
+`kernelsu.ko` 的 vermagic 是 `6.1.166-dirty`（设备内核 `6.1.141`）。
+
+这解释了一个悬案：上次 root 失败**不是没刷进去**，而是
+**patch 成功、刷入成功，但内核拒绝加载版本不对的 .ko**。
+`DEVELOPER.md` 里「模块本来就没生效过」现在有了镜像级证据。
+
+**回滚底图必须用 `unpacked/rom/init_boot.img`。**
+
+#### 测试
+
+新增 41 个测试（总计 114 → **155**）：
+
+| 文件 | 覆盖 |
+|---|---|
+| `test_bootimg.py`（15 个） | header v0–v4 解析、ramdisk 检查、压缩格式识别、AVB footer、错误分支 |
+| `test_root.py`（26 个） | KMI 推导、计划生成、原厂留存、patch 后校验 |
+
+关键回归测试：
+- `test_check_ramdisk_blocks_boot_image` —— 防止 patch 无 ramdisk 的分区
+- `test_derive_kmi_android16_kernel_still_android14` —— 防止按 Android 版本选错 KMI
+- `test_derive_kmi_sublevel_not_part_of_kmi` —— 锁住「SubLevel 不属于 KMI」
+
 ## [0.3.2] - 2026-10-27
 
 ### 修复：菜单顶部设备状态不是实时的

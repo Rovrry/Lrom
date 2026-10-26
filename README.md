@@ -122,6 +122,27 @@ lrom flash ~/Downloads/rom.zip --images unpacked/rom
 | `lrom plan <包>` | 生成刷写计划 |
 | `lrom arb` | ARB 熔断检测 |
 | `lrom flash <包>` | 执行刷写 |
+| `lrom root` | 自动化 root（patch init_boot） |
+
+### 自动化 root
+
+刷完机后用全量包里留下的 `init_boot.img` 建立 root，**整个流程离线**：
+
+```bash
+./lrom root --dry-run      # 先看计划
+./lrom root                # ksud 方式，全自动
+./lrom root --method app   # 用手机上的 Manager APP 修补
+```
+
+`--method ksud` 需要自行准备 [ksud](https://github.com/tiann/KernelSU/releases)
+（Lrom 不捆绑，保持零依赖），放到 PATH 或用 `LROM_KSUD=/path/to/ksud` 指定。
+
+失败可随时恢复，`lrom root` 会在刷写前把原厂镜像存到 `root-work/`：
+
+```bash
+fastboot flash init_boot root-work/init_boot-stock-<时间>.img
+```
+
 
 ### 关键参数
 
@@ -265,6 +286,8 @@ pip install -e ".[dev]"
 | `test_unpack.py` | 解压、extent 布局、SHA-256、拒绝增量 |
 | `test_flash.py` | 刷写流程、失败中止、关键分区跳过 |
 | `test_arb.py` | ARB 解析与降级拦截 |
+| `test_bootimg.py` | boot image 解析、ramdisk 检查、AVB footer |
+| `test_root.py` | KMI 推导、root 计划、原厂留存、patch 后校验 |
 
 ## 许可证
 

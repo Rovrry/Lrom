@@ -17,6 +17,7 @@ htmlcov/
 
 # Lrom 运行产物
 work/
+root-work/
 *.log
 logs/
 out/
