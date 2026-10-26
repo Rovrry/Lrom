@@ -214,12 +214,25 @@ def build_parser() -> argparse.ArgumentParser:
     pf.add_argument("--allow-dangerous", action="store_true", help="允许写危险分区")
     pf.add_argument("--no-reboot", action="store_true", help="刷完不重启")
     pf.add_argument(
+        "--force-arb",
+        action="store_true",
+        help="跳过 ARB 熔断拦截（降级时极度危险，可能硬砖）",
+    )
+    pf.add_argument(
         "--wipe",
         action="store_true",
         help="清空用户数据（恢复出厂设置，降级/救砖时使用）",
     )
     pf.add_argument("--adb-port", type=int, default=None, help="adb server 端口")
     pf.set_defaults(func=cmd_flash)
+
+    pa = sub.add_parser("arb", help="ARB 熔断检测（判断降级是否会变砖）")
+    pa.add_argument(
+        "-i", "--images", default="unpacked/rom", help="镜像目录（默认 unpacked/rom）"
+    )
+    pa.add_argument("--xbl-config", default=None, help="指定 xbl_config 镜像路径")
+    pa.add_argument("--adb-port", type=int, default=None, help="adb server 端口")
+    pa.set_defaults(func=cmd_arb)
 
     return p
 
@@ -502,6 +515,9 @@ def cmd_flash(args: argparse.Namespace) -> int:
             )
 
     # ---- 3) 计划 ----
+    from .device.runner import FastbootRunner as _FB
+
+    fb_early = _FB()
     plan = build_plan(
         info.manifest,
         package_path=str(info.path),
@@ -522,6 +538,47 @@ def cmd_flash(args: argparse.Namespace) -> int:
             print(f"  {i.message}")
         return 1
 
+    # ---- 4.5) ARB 熔断检测（防止降级硬砖）----
+    from .core.arb import (
+        ArbVerdict,
+        compare_arb,
+        parse_xbl_config,
+        read_device_arb_adb,
+        read_device_arb_fastboot,
+    )
+
+    pkg_arb = None
+    for cand in (image_dir / "xbl_config.img", image_dir / "xbl_config_a.img"):
+        if cand.exists():
+            try:
+                pkg_arb = parse_xbl_config(cand)
+                break
+            except Exception:
+                pass
+
+    dev_arb = None
+    try:
+        if dev.mode is DeviceMode.ADB:
+            dev_arb = read_device_arb_adb(
+                AdbRunner(server_port=args.adb_port), dev.serial
+            )
+        if dev_arb is None and dev.mode is not DeviceMode.ADB:
+            # 仅在已在 fastboot 时才尝试 fetch，避免在系统模式下长时间等待
+            dev_arb = read_device_arb_fastboot(fb_early)
+    except Exception:
+        pass
+
+    arb_cmp = compare_arb(pkg_arb, dev_arb)
+    if arb_cmp.verdict is ArbVerdict.BRICK and not getattr(args, "force_arb", False):
+        print()
+        print(paint("✗ ARB 熔断检测未通过：此包会导致硬砖", C.RED + C.BOLD))
+        print(f"  包内 ARB      : {pkg_arb.arb_index if pkg_arb else '?'}")
+        print(f"  设备已熔断 ARB: {dev_arb.arb_index if dev_arb else '?'}")
+        print()
+        print("  这是硬件级不可恢复操作，Lrom 已阻止。")
+        print("  如果确认要继续，请使用 --force-arb（极度危险）")
+        return 1
+
     # ---- 5) 展示计划 ----
     fb_ops = plan.by_phase(Phase.FASTBOOT)
     fbd_ops = plan.by_phase(Phase.FASTBOOTD)
@@ -536,6 +593,12 @@ def cmd_flash(args: argparse.Namespace) -> int:
         print(f"│ 数据   : {paint('将清空（恢复出厂设置）', C.RED)}")
     else:
         print(f"│ 数据   : 保留")
+    arb_color = {
+        ArbVerdict.SAFE: C.GREEN,
+        ArbVerdict.UPGRADE: C.GREEN,
+        ArbVerdict.UNKNOWN: C.YELLOW,
+    }.get(arb_cmp.verdict, C.YELLOW)
+    print(f"│ ARB    : {paint(arb_cmp.verdict.value, arb_color)}")
     print(paint("╰" + "─" * 56, C.BOLD))
 
     for i in issues:
@@ -650,3 +713,80 @@ def cmd_flash(args: argparse.Namespace) -> int:
     print("  · 若无法进入系统，用备份恢复:")
     print("      lrom restore backups/<机型>_<时间>/")
     return 1
+
+
+def cmd_arb(args: argparse.Namespace) -> int:
+    """ARB 熔断检测：判断降级是否会变砖。"""
+    from .core.arb import (
+        ArbVerdict,
+        compare_arb,
+        parse_xbl_config,
+        ArbError,
+        read_device_arb_adb,
+        read_device_arb_fastboot,
+    )
+    from .device.discover import DeviceMode, detect
+    from .device.runner import AdbRunner, FastbootRunner
+
+    # ---- 包的 ARB ----
+    pkg_arb = None
+    img_dir = Path(args.images)
+    candidates = [img_dir / "xbl_config.img", img_dir / "xbl_config_a.img"]
+    if args.xbl_config:
+        candidates.insert(0, Path(args.xbl_config))
+
+    for cand in candidates:
+        if cand.exists():
+            try:
+                pkg_arb = parse_xbl_config(cand)
+                pkg_arb.source = str(cand)
+                break
+            except ArbError as exc:
+                print(f"  {paint('!!', C.YELLOW)} 解析 {cand.name} 失败: {exc}")
+
+    # ---- 设备的 ARB ----
+    dev_arb = None
+    dev = detect(adb_server_port=args.adb_port)
+    if dev:
+        if dev.mode is DeviceMode.ADB:
+            adb = AdbRunner(server_port=args.adb_port)
+            dev_arb = read_device_arb_adb(adb, dev.serial)
+        elif dev.mode in (DeviceMode.FASTBOOT, DeviceMode.FASTBOOTD):
+            dev_arb = read_device_arb_fastboot(FastbootRunner())
+    else:
+        # 没有设备也可能在 fastboot
+        try:
+            dev_arb = read_device_arb_fastboot(FastbootRunner())
+        except Exception:
+            pass
+
+    print()
+    print(paint("╭─ ARB 熔断检测 " + "─" * 42, C.BOLD))
+    if pkg_arb:
+        print(f"│ 包内 xbl_config : {paint(pkg_arb.describe(), C.CYAN)}")
+    else:
+        print(f"│ 包内 xbl_config : {paint('未能读取', C.YELLOW)}")
+    if dev_arb:
+        print(f"│ 设备当前        : {paint(dev_arb.describe(), C.CYAN)}   [{dev_arb.source}]")
+    else:
+        print(f"│ 设备当前        : {paint('未能读取', C.YELLOW)}")
+    print(paint("╰" + "─" * 56, C.BOLD))
+    print()
+
+    cmp = compare_arb(pkg_arb, dev_arb)
+    colors = {
+        ArbVerdict.SAFE: C.GREEN,
+        ArbVerdict.UPGRADE: C.GREEN,
+        ArbVerdict.BRICK: C.RED,
+        ArbVerdict.UNKNOWN: C.YELLOW,
+    }
+    print(paint(f"  结论: {cmp.verdict.value}", colors[cmp.verdict] + C.BOLD))
+    print(f"  {cmp.message}")
+    print()
+
+    if cmp.verdict is ArbVerdict.UNKNOWN:
+        print("  提示：设备侧 ARB 需要在 fastboot 模式下回读，或设备已 root。")
+        print("        无法确认时，请勿降级到更低的系统版本。")
+        print()
+
+    return 0 if cmp.verdict is not ArbVerdict.BRICK else 1
