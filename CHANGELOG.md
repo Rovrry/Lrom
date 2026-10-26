@@ -32,7 +32,7 @@ patch 出来的 `kernelsu.ko` 的 vermagic 是 `6.1.166-dirty`，设备内核是
 **sha256 逐字节相同**（413296 字节）。KMI 兼容就够了，
 vermagic 里的 SubLevel 不参与判定。
 
-这推翻了 `DEVELOPER.md` 早期「vermagic 不匹配所以没生效」的推断
+这推翻了项目早期「vermagic 不匹配所以没生效」的推断
 —— 那次失败的真正原因是流程没走通，不是 vermagic。
 
 **② `su -c id` 从 adb shell 失败是正常现象**
@@ -248,7 +248,7 @@ unpacked/rom/init_boot.img  → 21 个标准 ramdisk 条目，无 KSU 痕迹
 
 这解释了一个悬案：上次 root 失败**不是没刷进去**，而是
 **patch 成功、刷入成功，但内核拒绝加载版本不对的 .ko**。
-`DEVELOPER.md` 里「模块本来就没生效过」现在有了镜像级证据。
+早期「模块本来就没生效过」的记录现在有了镜像级证据。
 
 **回滚底图必须用 `unpacked/rom/init_boot.img`。**
 

@@ -300,8 +300,8 @@ fastboot reboot      # 当前在 fastboot
 
 ## 开发
 
-**开发前请先读 [docs/DEVELOPER.md](docs/DEVELOPER.md)** —— 里面有完整的架构说明、
-踩坑记录与当前进度。
+架构说明、踩坑记录与技术决策见 [docs/ROOT-IMPLEMENTATION.md](docs/ROOT-IMPLEMENTATION.md)
+（自动化 root 部分的完整实现方法）。
 
 ```bash
 # 运行测试
@@ -311,7 +311,7 @@ python3 -m pytest tests/unit -q
 pip install -e ".[dev]"
 ```
 
-测试覆盖（71 个）：
+测试覆盖（193 个）：
 
 | 文件 | 覆盖内容 |
 |---|---|
@@ -321,6 +321,8 @@ pip install -e ".[dev]"
 | `test_unpack.py` | 解压、extent 布局、SHA-256、拒绝增量 |
 | `test_flash.py` | 刷写流程、失败中止、关键分区跳过 |
 | `test_arb.py` | ARB 解析与降级拦截 |
+| `test_monitor.py` | 设备监测 |
+| `test_menu_integrity.py` | 菜单模块 AST 名字解析（防误删函数） |
 | `test_bootimg.py` | boot image 解析、ramdisk 检查、AVB footer |
 | `test_root.py` | KMI 推导、root 计划、原厂留存、patch 后校验、刷入模式 |
 | `test_manager_fetch.py` | 联网协议：域名/HTTPS 白名单、摘要校验 |

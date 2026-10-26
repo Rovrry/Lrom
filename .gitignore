@@ -46,5 +46,8 @@ plans/
 # 解包产物
 unpacked/
 
+# 本地开发上下文（含设备序列号、个人环境等信息，不公开）
+docs/DEVELOPER.md
+
 # 待 token 加 workflow 权限后再提交
 .github/
