@@ -177,6 +177,9 @@ def build_parser() -> argparse.ArgumentParser:
     pd = sub.add_parser("devices", help="检测连接的设备")
     pd.set_defaults(func=cmd_devices)
 
+    psc = sub.add_parser("selfcheck", help="环境自检（adb/udev/权限）")
+    psc.set_defaults(func=cmd_selfcheck)
+
     pb = sub.add_parser("backup", help="刷前备份关键分区（需要 root）")
     pb.add_argument(
         "--partitions",
@@ -858,3 +861,19 @@ def cmd_arb(args: argparse.Namespace) -> int:
         print()
 
     return 0 if cmp.verdict is not ArbVerdict.BRICK else 1
+
+
+def cmd_selfcheck(args: argparse.Namespace) -> int:
+    """环境自检。"""
+    from .device.selfcheck import format_selfcheck, run_selfcheck
+
+    print()
+    print(paint("╭─ 环境自检 " + "─" * 45, C.BOLD))
+    print()
+    items = run_selfcheck()
+    print(format_selfcheck(items))
+    print()
+
+    from .device.selfcheck import Level
+
+    return 1 if any(i.level is Level.ERROR for i in items) else 0

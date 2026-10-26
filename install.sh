@@ -22,20 +22,77 @@ PYVER=$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])')
 echo "==> Python $PYVER"
 
 # 2) 检查 adb / fastboot
+# ---------------------------------------------------------------------------
+# 注意：Linux 内核自带 USB 驱动，不需要像 Windows 那样装驱动。
+# 需要的是 adb / fastboot 这两个【命令行工具】。
 missing=()
 command -v adb >/dev/null 2>&1 || missing+=("adb")
 command -v fastboot >/dev/null 2>&1 || missing+=("fastboot")
-if [ ${#missing[@]} -gt 0 ]; then
-  echo
-  echo "警告: 未找到 ${missing[*]}"
-  echo "  请安装（不需要 root）:"
-  echo "    Debian/Ubuntu/Kali: sudo apt install adb fastboot"
-  echo "    Arch:               sudo pacman -S android-tools"
-  echo "    Fedora:             sudo dnf install android-tools"
-  echo
-  echo "  也可以稍后写配置: ~/.config/lrom/config.json"
+
+# 也检查 Lrom 配置文件里是否已指定可用路径
+CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/lrom/config.json"
+if [ ${#missing[@]} -gt 0 ] && [ -f "$CONFIG" ]; then
+  for t in adb fastboot; do
+    p=$(python3 -c "
+import json,sys
+try:
+    print(json.load(open('$CONFIG')).get('tools',{}).get('$t',''))
+except Exception: pass" 2>/dev/null || true)
+    if [ -n "$p" ] && [ -x "$p" ]; then
+      echo "==> $t 已由配置文件指定: $p"
+      newmissing=()
+      for m in "${missing[@]:-}"; do [ "$m" != "$t" ] && newmissing+=("$m"); done
+      missing=("${newmissing[@]:-}")
+    fi
+  done
 fi
 
+if [ ${#missing[@]} -gt 0 ] && [ -n "${missing[0]:-}" ]; then
+  echo
+  echo "+--------------------------------------------------------------+"
+  echo "| 未找到命令: ${missing[*]}"
+  echo "+--------------------------------------------------------------+"
+  cat <<'EOF'
+
+
+说明: Linux 内核自带 USB 驱动, 无需像 Windows 那样安装驱动.
+      需要的是 adb / fastboot 命令行工具.
+
+【推荐】用系统包管理器安装:
+
+  Debian / Ubuntu / Kali:
+      sudo apt update
+      sudo apt install adb fastboot android-sdk-platform-tools-common
+
+  Arch:
+      sudo pacman -S android-tools android-udev
+
+  Fedora:
+      sudo dnf install android-tools
+
+注意 Kali/Debian 的坑:
+  - 包名是 adb / fastboot, 不是 android-tools-adb (那是废弃空包)
+  - android-sdk-platform-tools-common 提供 udev 规则,
+    不装的话 adb/fastboot 需要 root 才能访问设备
+
+【没有 sudo 时】手动下载到用户目录:
+
+  mkdir -p ~/bin/platform-tools && cd ~/bin/platform-tools
+  for p in android-libbase android-libcutils android-liblog \
+           android-libziparchive android-libboringssl android-libsparse \
+           adb fastboot; do apt-get download $p; done
+  for f in *.deb; do dpkg-deb -x "$f" .; done
+
+  然后在 ~/.config/lrom/config.json 里指定路径 (见 README)
+
+安装后重新运行本脚本.
+EOF
+  echo
+  echo "==> 继续安装（离线功能 inspect/unpack/plan/arb 仍可使用）"
+  echo
+fi
+
+# ---------------------------------------------------------------------------
 # 3) 创建 venv 并安装
 echo "==> 创建虚拟环境"
 python3 -m venv "$VENV"

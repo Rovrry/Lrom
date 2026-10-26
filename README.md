@@ -43,18 +43,29 @@ cd Lrom
 ./install.sh
 ```
 
-需要 `adb` 与 `fastboot`（从发行版仓库安装，**不需要 root**）：
+需要 `adb` 与 `fastboot`（从发行版仓库安装，**不需要 root**，Linux 内核自带 USB 驱动）：
 
 ```bash
 # Debian / Ubuntu / Kali
-sudo apt install adb fastboot
+sudo apt install adb fastboot android-sdk-platform-tools-common
 
 # Arch
-sudo pacman -S android-tools
+sudo pacman -S android-tools android-udev
 
 # Fedora
 sudo dnf install android-tools
 ```
+
+> **注意**：Kali/Debian 的包名是 `adb` / `fastboot`，不是废弃的 `android-tools-adb`。
+> `android-sdk-platform-tools-common` 提供 udev 规则，不装的话普通用户可能无法访问设备。
+
+安装后建议先跑一次自检：
+
+```bash
+lrom selfcheck
+```
+
+它会检查 adb/fastboot、udev 规则、用户组权限、adb server 归属，并给出可直接复制的修复命令。
 
 ## 使用
 
@@ -86,6 +97,7 @@ lrom flash ~/Downloads/rom.zip --images unpacked/rom
 |---|---|
 | `lrom` | 无参数进入交互菜单 |
 | `lrom devices` | 检测连接设备 |
+| `lrom selfcheck` | 环境自检（adb/udev/权限/adb server） |
 | `lrom inspect <包>` | 分析 ROM 包 |
 | `lrom backup` | 刷前备份关键分区（需 root） |
 | `lrom unpack <包>` | 解包出分区镜像 |
