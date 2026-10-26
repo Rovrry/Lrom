@@ -41,6 +41,7 @@ class StepResult:
     size: int = 0
     message: str = ""
     recovery_hint: str = ""
+    slot_written: str = ""
 
     @property
     def size_mb(self) -> float:
@@ -179,7 +180,10 @@ class FlashExecutor:
         on_step: Callable[[StepResult], None] | None = None,
         on_progress: Callable[[str, int, int], None] | None = None,
         on_mode_change: Callable[[Phase], None] | None = None,
+        on_notice: Callable[[str], None] | None = None,
         wipe_data: bool = False,
+        both_slots: bool = False,
+        recreate_logical: bool = True,
     ) -> None:
         self.plan = plan
         self.image_dir = image_dir
@@ -189,7 +193,10 @@ class FlashExecutor:
         self.on_step = on_step
         self.on_progress = on_progress
         self.on_mode_change = on_mode_change
+        self.on_notice = on_notice
         self.wipe_data = wipe_data
+        self.both_slots = both_slots
+        self.recreate_logical = recreate_logical
         self.result = FlashResult(plan=plan)
         self._stop = False
 
@@ -262,6 +269,25 @@ class FlashExecutor:
                 self.result.aborted = True
                 return False
 
+            # 逻辑分区：先删除再重建，确保容量正确、清理 COW 层
+            if (
+                phase is Phase.FASTBOOTD
+                and self.recreate_logical
+                and not self.dry_run
+            ):
+                rebuild_note = self._recreate_logical_partition(op)
+                if rebuild_note is not None:
+                    sr = StepResult(
+                        op.partition,
+                        StepStatus.FAILED,
+                        message=rebuild_note,
+                        recovery_hint=self._logical_recovery_hint(op),
+                    )
+                    self.result.steps.append(sr)
+                    if self.on_step:
+                        self.on_step(sr)
+                    return False
+
             sr = self._flash_one(op)
             self.result.steps.append(sr)
             if self.on_step:
@@ -272,7 +298,116 @@ class FlashExecutor:
                 return False
             # LOCKED（关键分区未解锁）不中止，继续下一分区
 
+            # 双槽：再刷另一个槽位
+            if self.both_slots and sr.status is StepStatus.OK and not self.dry_run:
+                sr2 = self._flash_other_slot(op)
+                if sr2 is not None:
+                    self.result.steps.append(sr2)
+                    if self.on_step:
+                        self.on_step(sr2)
+                    if sr2.status is StepStatus.FAILED:
+                        return False
+
         return True
+
+    # -- 逻辑分区重建 -------------------------------------------------
+
+    def _target_slot_suffix(self) -> str:
+        """当前目标槽位后缀，如 "_a"。"""
+        slot = self.plan.slot or "a"
+        return slot if slot.startswith("_") else f"_{slot}"
+
+    def _recreate_logical_partition(self, op: FlashOp) -> str | None:
+        """删除并重建逻辑分区，返回 None 表示成功，否则返回错误信息。
+
+        为什么需要：直接 flash 一个逻辑分区时，若目标分区不存在或容量不足会失败；
+        另外虚拟 A/B 的 COW 快照层（xxx_a-cow）会残留旧数据。
+        做法参照 Universal_Flasher：
+          delete-logical-partition <name>_a / _b / _a-cow / _b-cow
+          create-logical-partition <name>_a <size_blocks>
+          create-logical-partition <name>_b <size_blocks>
+        """
+        assert self.fb is not None
+        if not op.size:
+            return None
+
+        base = op.partition
+        # super 内的分区名通常不带槽位
+        if base.endswith(("_a", "_b")):
+            base = base[:-2]
+
+        size_blocks = max(1, op.size // 4096)
+        errors: list[str] = []
+
+        # 删除所有 4 种命名（已存在则删，不存在会报错，忽略）
+        for name in (f"{base}_a", f"{base}_b", f"{base}_a-cow", f"{base}_b-cow"):
+            self.fb.run("delete-logical-partition", name, timeout=60)
+
+        # 重建两个槽位的逻辑分区
+        for name in (f"{base}_a", f"{base}_b"):
+            res = self.fb.run(
+                "create-logical-partition", name, str(size_blocks), timeout=120
+            )
+            if not self.fb.ok(res):
+                errors.append(f"create {name}: {_extract_error(res)}")
+
+        if errors:
+            return " ; ".join(errors[:2])
+        return None
+
+    def _logical_recovery_hint(self, op: FlashOp) -> str:
+        base = op.partition
+        if base.endswith(("_a", "_b")):
+            base = base[:-2]
+        blocks = max(1, op.size // 4096)
+        return (
+            f"fastboot create-logical-partition {base}_a {blocks} 然后 "
+            f"fastboot flash {base}_a {base}.img"
+        )
+
+    # -- 双槽刷写 -----------------------------------------------------
+
+    def _flash_other_slot(self, op: FlashOp) -> StepResult | None:
+        """把同一镜像再刷到另一个槽位。"""
+        assert self.fb is not None
+        if op.partition in ("super", "userdata", "metadata", "misc"):
+            return None  # 非槽位分区
+        if op.partition.endswith("_a") or op.partition.endswith("_b"):
+            base = op.partition[:-2]
+        else:
+            base = op.partition
+
+        # 判断设备是否存在对应槽位分区：直接尝试，失败则静默跳过
+        img = self.image_dir / (op.image or f"{base}.img")
+        if not img.exists():
+            return None
+
+        other = f"{base}_b" if self._target_slot_suffix() == "_a" else f"{base}_a"
+        start = time.time()
+        res = self.fb.run("flash", other, str(img), timeout=3600)
+        duration = time.time() - start
+
+        if self.fb.ok(res):
+            return StepResult(
+                other,
+                StepStatus.OK,
+                duration=duration,
+                size=img.stat().st_size,
+                message="双槽刷写",
+                slot_written=other,
+            )
+        msg = _extract_error(res)
+        if is_critical_locked(msg):
+            return StepResult(
+                other, StepStatus.LOCKED, duration=duration, message="关键分区未解锁，已跳过"
+            )
+        return StepResult(
+            other,
+            StepStatus.FAILED,
+            duration=duration,
+            message=msg,
+            recovery_hint=f"fastboot flash {other} {img.name}",
+        )
 
     def run(self) -> FlashResult:
         self.result.started_at = time.time()
@@ -397,16 +532,33 @@ class FlashExecutor:
                 pass
         return False
 
-    def _enter_fastbootd(self, timeout: float = 180.0) -> bool:
-        """从 fastboot 切换到 fastbootd 并等待就绪。"""
+    def _enter_fastbootd(self, timeout: float = 300.0) -> bool:
+        """从 fastboot 切换到 fastbootd 并等待就绪。
+
+        注意：OPLUS 设备的 fastbootd 可能显示语言选择界面并暂停，
+        此时需要用户手动点选。因此等待期间会周期性输出提示，
+        超时后给出明确的处理建议。
+        """
         assert self.fb is not None
         self.fb.run("reboot", "fastboot", timeout=60)
 
-        deadline = time.time() + timeout
+        start = time.time()
+        deadline = start + timeout
+        hinted = False
         while time.time() < deadline:
             if self._stop:
                 return False
             time.sleep(3)
+            elapsed = time.time() - start
+
+            # 15 秒还没就绪，提示用户可能需要手动操作
+            if elapsed > 15 and not hinted and self.on_notice:
+                hinted = True
+                self.on_notice(
+                    "正在等待设备进入 FastbootD…\n"
+                    "  如果手机屏幕上出现语言选择/English 界面，请手动点选后继续等待。"
+                )
+
             try:
                 serials = self.fb.devices()
             except Exception:
@@ -415,6 +567,14 @@ class FlashExecutor:
                 if self.fb.is_fastbootd():
                     time.sleep(2)
                     return True
+
+        if self.on_notice:
+            self.on_notice(
+                "等待 FastbootD 超时（{}秒）。请检查手机屏幕：\n"
+                "  · 是否停在语言选择界面？点选 English 后重试\n"
+                "  · 是否已回到系统？执行 fastboot reboot fastboot 重试\n"
+                "  · 数据线是否正常？".format(int(timeout))
+            )
         return False
 
 

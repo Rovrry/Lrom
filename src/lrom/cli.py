@@ -218,6 +218,16 @@ def build_parser() -> argparse.ArgumentParser:
         help=argparse.SUPPRESS,  # 已废弃：Lrom 永不自动重启
     )
     pf.add_argument(
+        "--both-slots",
+        action="store_true",
+        help="同时刷写 A/B 两个槽位（切换槽后不会回退到旧版本）",
+    )
+    pf.add_argument(
+        "--no-recreate-logical",
+        action="store_true",
+        help="不重建逻辑分区（默认会先 delete/create，更可靠）",
+    )
+    pf.add_argument(
         "--force-arb",
         action="store_true",
         help="跳过 ARB 熔断拦截（降级时极度危险，可能硬砖）",
@@ -603,6 +613,12 @@ def cmd_flash(args: argparse.Namespace) -> int:
         ArbVerdict.UNKNOWN: C.YELLOW,
     }.get(arb_cmp.verdict, C.YELLOW)
     print(f"│ ARB    : {paint(arb_cmp.verdict.value, arb_color)}")
+    if getattr(args, "both_slots", False):
+        print(f"│ 槽位   : {paint('A + B 双槽刷写', C.CYAN)}")
+    else:
+        print(f"│ 槽位   : 仅 _{dev.slot or 'a'}")
+    if not getattr(args, "no_recreate_logical", False):
+        print(f"│ 逻辑分区: 写入前会 delete + create（清理 COW 层）")
     print(paint("╰" + "─" * 56, C.BOLD))
 
     for i in issues:
@@ -658,6 +674,9 @@ def cmd_flash(args: argparse.Namespace) -> int:
         plan, image_dir, fb=fb, adb=adb, dry_run=dry_run,
         on_mode_change=on_mode_change,
         wipe_data=getattr(args, "wipe", False),
+        both_slots=getattr(args, "both_slots", False),
+        recreate_logical=not getattr(args, "no_recreate_logical", False),
+        on_notice=lambda msg: print(paint(f"  {msg}", C.YELLOW)),
     )
 
     print()

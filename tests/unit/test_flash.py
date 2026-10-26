@@ -318,3 +318,91 @@ def test_wipe_failure_reported(tmp_path):
 
     assert not result.ok
     assert "清空用户数据失败" in result.error
+
+
+# -- 逻辑分区重建 -------------------------------------------------------
+
+def test_recreate_logical_partition(tmp_path):
+    """逻辑分区应先 delete 再 create，然后 flash。"""
+    plan = make_plan(tmp_path)  # 含 system（逻辑分区）
+    fb = FakeFastboot()
+    ex = make_executor(plan, tmp_path, fb)
+    ex.recreate_logical = True
+    ex.run()
+
+    actions = [c[0] for c in fb.calls if c]
+    assert "delete-logical-partition" in actions
+    assert "create-logical-partition" in actions
+
+    # delete 必须在 create 之前
+    first_delete = actions.index("delete-logical-partition")
+    first_create = actions.index("create-logical-partition")
+    assert first_delete < first_create
+
+
+def test_recreate_deletes_cow_partitions(tmp_path):
+    """必须清理 _a-cow / _b-cow 快照层。"""
+    plan = make_plan(tmp_path)
+    fb = FakeFastboot()
+    ex = make_executor(plan, tmp_path, fb)
+    ex.run()
+
+    deleted = [c[1] for c in fb.calls if c and c[0] == "delete-logical-partition"]
+    assert any("-cow" in d for d in deleted)
+
+
+def test_recreate_creates_both_slots(tmp_path):
+    plan = make_plan(tmp_path)
+    fb = FakeFastboot()
+    ex = make_executor(plan, tmp_path, fb)
+    ex.run()
+
+    created = [c[1] for c in fb.calls if c and c[0] == "create-logical-partition"]
+    assert any(c.endswith("_a") for c in created)
+    assert any(c.endswith("_b") for c in created)
+
+
+def test_no_recreate_when_disabled(tmp_path):
+    plan = make_plan(tmp_path)
+    fb = FakeFastboot()
+    ex = make_executor(plan, tmp_path, fb)
+    ex.recreate_logical = False
+    ex.run()
+
+    actions = [c[0] for c in fb.calls if c]
+    assert "delete-logical-partition" not in actions
+
+
+def test_dry_run_skips_recreate(tmp_path):
+    plan = make_plan(tmp_path)
+    fb = FakeFastboot()
+    ex = make_executor(plan, tmp_path, fb, dry_run=True)
+    ex.run()
+
+    actions = [c[0] for c in fb.calls if c]
+    assert "delete-logical-partition" not in actions
+
+
+# -- 双槽刷写 -----------------------------------------------------------
+
+def test_both_slots_flashes_both(tmp_path):
+    plan = make_plan(tmp_path, with_logical=False)
+    fb = FakeFastboot()
+    ex = make_executor(plan, tmp_path, fb)
+    ex.both_slots = True
+    ex.run()
+
+    flashed = [c[1] for c in fb.calls if c and c[0] == "flash"]
+    # 先刷不带槽位的 boot（落到当前槽位），再补刷另一槽 boot_b
+    assert "boot" in flashed
+    assert "boot_b" in flashed
+
+
+def test_both_slots_off_by_default(tmp_path):
+    plan = make_plan(tmp_path, with_logical=False)
+    fb = FakeFastboot()
+    ex = make_executor(plan, tmp_path, fb)
+    ex.run()
+
+    flashed = [c[1] for c in fb.calls if c and c[0] == "flash"]
+    assert "boot_a" not in flashed  # 默认只刷不带槽位的名字

@@ -41,3 +41,6 @@ payload_properties.txt
 # 备份文件
 backups/
 plans/
+
+# 解包产物
+unpacked/
