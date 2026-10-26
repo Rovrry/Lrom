@@ -212,7 +212,11 @@ def build_parser() -> argparse.ArgumentParser:
     pf.add_argument("--yes", action="store_true", help="跳过确认（危险）")
     pf.add_argument("--partitions", nargs="+", default=None, help="只刷指定分区")
     pf.add_argument("--allow-dangerous", action="store_true", help="允许写危险分区")
-    pf.add_argument("--no-reboot", action="store_true", help="刷完不重启")
+    pf.add_argument(
+        "--no-reboot",
+        action="store_true",
+        help=argparse.SUPPRESS,  # 已废弃：Lrom 永不自动重启
+    )
     pf.add_argument(
         "--force-arb",
         action="store_true",
@@ -613,6 +617,13 @@ def cmd_flash(args: argparse.Namespace) -> int:
             print(paint("    数据策略：将清空所有用户数据！", C.RED + C.BOLD))
         else:
             print("    数据策略：保留用户数据（升级模式）")
+            print(
+                paint(
+                    "    注意：如果这是降级包，保留数据会无法开机，"
+                    "降级必须加 --wipe",
+                    C.YELLOW,
+                )
+            )
         print("    请确认：电量 > 50%、数据线稳定、不要中途拔线。")
         print()
         try:
@@ -697,13 +708,8 @@ def cmd_flash(args: argparse.Namespace) -> int:
 
     if result.ok:
         print(paint("✓ 刷写完成", C.GREEN + C.BOLD))
-        if not args.no_reboot:
-            print("  正在重启设备…")
-            try:
-                fb.run("reboot", timeout=60)
-            except Exception as exc:
-                print(f"  重启失败: {exc}")
-                print("  请手动长按电源键重启")
+        print()
+        _print_after_flash_notice(arb_cmp, wipe=getattr(args, "wipe", False))
         return 0
 
     print(paint("✗ 刷写失败", C.RED + C.BOLD))
@@ -713,6 +719,49 @@ def cmd_flash(args: argparse.Namespace) -> int:
     print("  · 若无法进入系统，用备份恢复:")
     print("      lrom restore backups/<机型>_<时间>/")
     return 1
+
+
+def _print_after_flash_notice(arb_cmp, *, wipe: bool) -> None:
+    """刷写完成后的提示。强调：不自动重启、降级必须格式化。
+
+    Lrom 刻意不自动重启设备 —— 重启决策权必须留给用户，
+    尤其是在降级场景下，先重启会绕过格式化步骤导致无法开机。
+    """
+    from .core.arb import ArbVerdict
+
+    print(paint("╭─ 后续操作（请务必阅读）" + "─" * 24, C.YELLOW + C.BOLD))
+
+    is_downgrade_risk = arb_cmp is not None and arb_cmp.verdict in (
+        ArbVerdict.SAFE,
+        ArbVerdict.BRICK,
+        ArbVerdict.UNKNOWN,
+    )
+
+    if not wipe:
+        print("│")
+        print(paint("│ ⚠️  若是降级（刷入的系统版本低于原版本）：", C.RED + C.BOLD))
+        print(paint("│    必须先格式化系统分区（清除用户数据），", C.RED))
+        print(paint("│    否则会无法开机甚至变砖！", C.RED + C.BOLD))
+        print("│")
+        print("│    正确做法（二选一）：")
+        print("│      1) 在 Fastboot 下执行:")
+        print("│           fastboot -w")
+        print("│      2) 或进入 Recovery，选择「格式化 data / 恢复出厂设置」")
+        print("│")
+        print("│    本次刷写保留了用户数据（升级场景）。")
+
+    if arb_cmp is not None and arb_cmp.verdict is ArbVerdict.UPGRADE:
+        print("│")
+        print(paint("│ 注意：本次刷写已提升 ARB 索引，此后再无法降级到更低版本。", C.YELLOW))
+
+    print("│")
+    print(paint("│ Lrom 不会自动重启设备。", C.BOLD))
+    print("│ 请确认以上事项后再手动重启：")
+    print("│    fastboot reboot          # 当前在 fastboot")
+    print("│    或长按电源键 10 秒")
+    print("│")
+    print(paint("╰" + "─" * 44, C.YELLOW + C.BOLD))
+    print()
 
 
 def cmd_arb(args: argparse.Namespace) -> int:

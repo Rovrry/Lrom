@@ -2,82 +2,189 @@
 
 > **L**inux **rom** flashing toolkit — 在 Linux 上刷 Android ROM 的交互式工具
 >
-> 面向欧加（OPPO / OnePlus / realme）设备，专注把「解包 → 校验 → 线刷」这一条链路做对、做安全。
+> 面向欧加（OPPO / OnePlus / realme）设备，专注把「分析 → 备份 → 预演 → 刷写」这条链路做对、做安全。
 
 ![status](https://img.shields.io/badge/status-alpha-orange)
 ![license](https://img.shields.io/badge/license-GPL--3.0--or--later-blue)
 ![platform](https://img.shields.io/badge/platform-Linux-informational)
+![python](https://img.shields.io/badge/python-3.10%2B-blue)
 
 ---
 
 ## 这是什么
 
-Lrom 是一个 **Linux 原生的 Android 线刷工具**，提供交互式菜单，让不熟悉命令行的用户也能安全地刷写 ROM。
+Lrom 是一个 **Linux 原生的 Android 线刷工具**。它把刷机拆成可审阅、可回退的步骤，
+默认做足安全检查，并且**永不替你自动重启设备**。
 
-它不是 Windows 工具的简单移植，而是围绕三个设计原则重写的：
+它解决 Windows 版工具普遍存在的三个问题：
 
-1. **不砖机 > 功能多** — 危险分区默认禁写，刷前先预演。
-2. **离线优先** — 核心链路不依赖任何服务器，零遥测。
-3. **可审阅** — 刷写计划是纯数据，执行前可见、可改。
+| 问题 | Windows 版工具 | Lrom |
+|---|---|---|
+| **增量包误判** | 不检查，解出残缺镜像照样刷 → 变砖 | 解析 manifest，增量包**直接拒绝** |
+| **型号不匹配** | 不校验 | 比对 `pre-device`，不匹配**硬阻止** |
+| **降级熔断** | 部分只警告 | 解析 ARB 索引，降级**硬阻止** |
 
-## 设计原则
+## 特性
 
-- **先计划，后执行**：任何写操作先生成可审查的刷写计划（JSON），确认后才动手。
-- **预演（dry-run）是一等公民**：能模拟出"将写哪些分区、共多少 GB、有哪些风险"。
-- **危险分区硬阻止**：`xbl` / `abl` / `persist` / `modemst*` 等默认禁止写入。
-- **ARB 降级硬阻止**：`rollback_index` 降级 = 硬件级变砖，直接拒绝。
-- **完全离线、零遥测**：不上报任何数据。
-
-## 支持范围（v0.1 规划中）
-
-| 包格式 | 状态 |
-|---|---|
-| 欧加（OPPO/OnePlus/realme）全量包 | 🚧 规划中 |
-| 通用 payload.bin 包 | 🚧 规划中 |
-| 散装 fastboot 包 | 🚧 规划中 |
-| 小米 tgz 线刷包 | 📋 计划中 |
-| OFP / OPS / OZIP | ❌ 明确不支持 |
-
-> **v0.1 不包含**：GUI、EDL(9008) 直连、OFP 解密、增量 OTA、自动 Root、联网下载 ROM。
+- ✅ **包分析** — 识别全量/增量 OTA、型号、版本、安全补丁
+- ✅ **刷前备份** — adb+root `dd` 备份 boot/init_boot/vbmeta 等关键分区，附 SHA-256 清单
+- ✅ **刷写计划** — 纯数据、可审阅、可导出 JSON
+- ✅ **预演模式** — 完整校验流水线，不写设备
+- ✅ **ARB 熔断检测** — 防降级硬砖
+- ✅ **两阶段刷写** — Fastboot（物理分区）+ FastbootD（逻辑分区）
+- ✅ **关键分区保护** — `persist`/`modemst`/`fsg` 等默认禁写
+- ✅ **零遥测** — 完全离线，不上报任何数据
 
 ## 安装
 
-> 尚未发布，开发中。
-
 ```bash
-# 规划中
-git clone https://github.com/<owner>/Lrom.git
+git clone https://github.com/Rovrry/Lrom.git
 cd Lrom
 ./install.sh
 ```
 
+需要 `adb` 与 `fastboot`（从发行版仓库安装，**不需要 root**）：
+
+```bash
+# Debian / Ubuntu / Kali
+sudo apt install adb fastboot
+
+# Arch
+sudo pacman -S android-tools
+
+# Fedora
+sudo dnf install android-tools
+```
+
 ## 使用
 
-> 尚未发布，开发中。
+### 完整流程
 
+```bash
+# 1. 分析 ROM 包，确认能否线刷
+lrom inspect ~/Downloads/rom.zip
+
+# 2. 备份设备关键分区（强烈建议）
+lrom backup
+
+# 3. 解包出分区镜像
+lrom unpack ~/Downloads/rom.zip -o unpacked/rom
+
+# 4. ARB 熔断检测
+lrom arb --images unpacked/rom
+
+# 5. 预演
+lrom flash ~/Downloads/rom.zip --images unpacked/rom --dry-run
+
+# 6. 真正刷写
+lrom flash ~/Downloads/rom.zip --images unpacked/rom
 ```
-  1) 解全量包          2) 查看包信息        3) 生成刷写计划
-  4) 预演检查          5) 线刷全量包        6) 只刷指定分区
-  7) 备份设备分区      8) 设备信息          9) 启动到 Fastboot
- 10) 环境自检         11) 查看日志          0) 退出
+
+### 命令一览
+
+| 命令 | 说明 |
+|---|---|
+| `lrom` | 无参数进入交互菜单 |
+| `lrom devices` | 检测连接设备 |
+| `lrom inspect <包>` | 分析 ROM 包 |
+| `lrom backup` | 刷前备份关键分区（需 root） |
+| `lrom unpack <包>` | 解包出分区镜像 |
+| `lrom plan <包>` | 生成刷写计划 |
+| `lrom arb` | ARB 熔断检测 |
+| `lrom flash <包>` | 执行刷写 |
+
+### 关键参数
+
+| 参数 | 说明 |
+|---|---|
+| `--dry-run` | 预演，不写设备 |
+| `--wipe` | 清空用户数据（**降级/救砖必用**） |
+| `--partitions` | 只刷指定分区 |
+| `--allow-dangerous` | 允许写危险分区 |
+| `--force-arb` | 跳过 ARB 拦截（极度危险） |
+
+## ⚠️ 重要：Lrom 不会自动重启设备
+
+刷写完成后，Lrom 会停下来让你确认。这是刻意的设计——**重启的决策权必须留给你**。
+
+### 如果是降级，必须先格式化
+
+> **降级**（刷入版本低于原系统）时，**必须先格式化系统分区**，否则会无法开机甚至变砖。
+
+```bash
+# 方式一：Fastboot 下执行
+fastboot -w
+
+# 方式二：进入 Recovery，选择「格式化 data / 恢复出厂设置」
 ```
+
+用 Lrom 刷降级包时，请加 `--wipe`：
+
+```bash
+lrom flash old_rom.zip --images unpacked/rom --wipe
+```
+
+### 确认后手动重启
+
+```bash
+fastboot reboot      # 当前在 fastboot
+# 或长按电源键 10 秒
+```
+
+## 支持范围
+
+| 包格式 | 状态 |
+|---|---|
+| 欧加（OPPO/OnePlus/realme）全量 OTA 包 | ✅ 已验证 |
+| 通用 payload.bin 全量包 | ✅ |
+| 增量 OTA 包 | ❌ 明确拒绝 |
+| 小米 tgz / OFP / OPS / OZIP | 📋 计划中 |
+
+**v0.1 不包含**：GUI、EDL(9008) 直连、OFP 解密、增量 OTA、自动 Root、联网下载 ROM。
 
 ## 安全警告
 
 ⚠️ **刷机有风险，可能变砖、丢失数据、失去保修。** 请务必：
 
-1. 刷机前**备份所有数据**
-2. 确认设备型号与 ROM 包**完全匹配**
-3. 首次使用先跑**预演检查**
-4. 保持设备电量 > 50%，使用**直连 USB 2.0 端口**（不要用 Hub）
+1. 刷机前**备份所有数据**，并先运行 `lrom backup`
+2. 确认设备型号与 ROM 包**完全匹配**（`lrom inspect` 会校验）
+3. 首次使用先跑 **`--dry-run` 预演**
+4. **降级必须格式化**，否则会变砖
+5. 保持设备电量 > 50%，使用**直连 USB 2.0 端口**（不要用 Hub）
 
-开发者不对任何设备损坏负责。详见 [LICENSE](LICENSE) 中的免责条款。
+开发者不对任何设备损坏负责。详见 [LICENSE](LICENSE)。
 
-## 环境要求
+## 已验证环境
 
-- Linux（Ubuntu 22.04+ / Debian 12+ / Kali / Fedora / Arch）
-- `adb`、`fastboot`（从发行版仓库安装，无需 root）
-- Python ≥ 3.10
+| 项目 | 详情 |
+|---|---|
+| 设备 | OnePlus OPD2404（一加平板 Pro），Android 16，A/B 双槽 |
+| 系统 | Kali GNU/Linux Rolling 2026.2 |
+| 刷机结果 | `16.0.5.702` → `16.0.5.1201`，34 个分区成功，用户数据保留 |
+
+> 注：该设备 BL 已解锁但未执行 `unlock_critical`，13 个关键分区（xbl/abl/tz 等）无法写入。
+> Lrom 会自动识别并跳过，不影响正常开机。
+
+## 开发
+
+```bash
+# 运行测试
+python3 -m pytest tests/unit -q
+
+# 本地安装
+pip install -e ".[dev]"
+```
+
+测试覆盖（71 个）：
+
+| 文件 | 覆盖内容 |
+|---|---|
+| `test_payload.py` | protobuf 解析、AOSP 枚举、大端头部 |
+| `test_package.py` | 包识别、全量/增量判定、型号校验 |
+| `test_plan.py` | 分区分级、刷写顺序、危险分区 |
+| `test_unpack.py` | 解压、extent 布局、SHA-256、拒绝增量 |
+| `test_flash.py` | 刷写流程、失败中止、关键分区跳过 |
+| `test_arb.py` | ARB 解析与降级拦截 |
 
 ## 许可证
 
@@ -85,4 +192,6 @@ cd Lrom
 
 ## 致谢
 
-本项目在功能规划上参考了 [VioletToolBox](https://github.com/Smart-Paocai/VioletToolBox)（GPL-3.0）的实践经验，但为独立实现，不使用其代码、商标与素材。
+功能规划上参考了 [VioletToolBox](https://github.com/Smart-Paocai/VioletToolBox)（GPL-3.0）的实践经验，
+但为完全独立实现，不使用其代码、商标与素材。
+Payload 格式遵循 AOSP [update_metadata.proto](https://android.googlesource.com/platform/system/update_engine/)。
