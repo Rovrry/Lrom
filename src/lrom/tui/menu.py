@@ -225,11 +225,16 @@ def build_menu(sess: "Session", env_ok: bool) -> str:
         f"   {_color('5', C.CYAN)}) 备份设备分区      刷前备份（需 root）",
         f"   {_color('6', C.CYAN)}) ARB 熔断检测      防降级硬砖",
         "",
+        f"  {_color('─ Root ────────────────────────────────────────', d)}",
+        f"   {_color('7', C.CYAN)}) 获取 Root          patch init_boot 并刷入",
+        f"   {_color('8', C.CYAN)}) 下载 Root 管理器   从 GitHub 下载 APK（唯一联网）",
+        f"   {_color('9', C.CYAN)}) 回滚 Root          刷回原厂 init_boot",
+        "",
         f"  {_color('─ 工具 ────────────────────────────────────────', d)}",
-        f"   {_color('7', C.CYAN)}) 设备信息          型号 / 版本 / 分区",
-        f"   {_color('8', C.CYAN)}) 重启设备          到 Fastboot / FastbootD / 系统",
-        f"   {_color('9', C.CYAN)}) 环境自检          重新检查 adb / udev / 权限",
-        f"  {_color('10', C.CYAN)}) 关于",
+        f"   {_color('10', C.CYAN)}) 设备信息          型号 / 版本 / 分区",
+        f"   {_color('11', C.CYAN)}) 重启设备          到 Fastboot / FastbootD / 系统",
+        f"   {_color('12', C.CYAN)}) 环境自检          重新检查 adb / udev / 权限",
+        f"   {_color('13', C.CYAN)}) 关于",
         "",
         f"   {_color('0', C.CYAN)}) 退出",
     ]
@@ -400,10 +405,13 @@ def run_menu() -> int:
         "4": lambda s_, m: _flow_flash(s_, m, dry_run=False, pick=True),
         "5": _menu_backup,
         "6": _menu_arb,
-        "7": _menu_device_info,
-        "8": _menu_reboot,
-        "9": _menu_selfcheck,
-        "10": _menu_about,
+        "7": _menu_root,
+        "8": _menu_fetch_manager,
+        "9": _menu_root_rollback,
+        "10": _menu_device_info,
+        "11": _menu_reboot,
+        "12": _menu_selfcheck,
+        "13": _menu_about,
     }
 
     def _draw() -> None:
@@ -725,10 +733,191 @@ def _menu_about(sess: Session, mon) -> None:
     print()
     print("  设计原则:")
     print("    · 不砖机 > 功能多")
-    print("    · 离线优先，零遥测")
+    print("    · 离线优先，零遥测（唯一联网：root 管理器下载）")
     print("    · 先出计划，后执行")
     print("    · 永不自动重启设备")
     print()
     print("  卸载方法: 直接删除本仓库目录即可。")
     print("  （Lrom 不安装到系统，没有残留文件）")
+    pause()
+
+
+# ---------------------------------------------------------------------------
+# Root
+# ---------------------------------------------------------------------------
+
+
+def _find_stock_init_boot(sess: "Session"):
+    """定位原厂 init_boot.img。"""
+    from pathlib import Path
+
+    candidates = []
+    if sess.image_dir:
+        candidates.append(Path(sess.image_dir) / "init_boot.img")
+    candidates.append(Path("unpacked/rom/init_boot.img"))
+    for p in candidates:
+        if p.is_file():
+            return p
+    return None
+
+
+def _menu_root(sess: "Session", mon) -> None:
+    """菜单 7：获取 Root。"""
+    import argparse
+
+    from ..cli import cmd_root
+
+    print()
+    image = _find_stock_init_boot(sess)
+    if image is None:
+        print(f"  {_color('找不到原厂 init_boot.img', C.YELLOW)}")
+        print()
+        print("  请先执行菜单 1（解全量包），或用命令行指定：")
+        print(f"    {_color('./lrom root -i <init_boot.img路径>', C.CYAN)}")
+        pause()
+        return
+
+    print(f"  原厂镜像: {image}")
+    print()
+    print(f"  {_color('提示', C.BOLD)}：")
+    print("    · 刷写前会把原厂镜像备份到 root-work/，可随时回滚")
+    print("    · 需要 KernelSU / Magisk 管理器 APK（菜单 8 可下载）")
+    print("    · Lrom 不会自动重启设备")
+    print()
+
+    rc = cmd_root(
+        argparse.Namespace(
+            image=image,
+            method="app",
+            partition=None,
+            flash_mode=None,
+            kmi=None,
+            dry_run=False,
+            yes=False,
+            workdir="root-work",
+            adb_port=None,
+        )
+    )
+    if rc != 0:
+        print()
+        print(f"  {_color('流程未完成。', C.YELLOW)}")
+    pause()
+
+
+def _menu_fetch_manager(sess: "Session", mon) -> None:
+    """菜单 8：下载 Root 管理器 APK。"""
+    from ..core.manager_fetch import MANAGER_SOURCES
+
+    print()
+    print(f"  {_color('下载 Root 管理器', C.BOLD)}")
+    print()
+    print("  这是 Lrom 唯一会联网的功能。只访问 GitHub，")
+    print("  只下载文件、不执行任何远程代码，下载后强制校验 sha256。")
+    print()
+
+    keys = list(MANAGER_SOURCES)
+    for i, key in enumerate(keys, 1):
+        src = MANAGER_SOURCES[key]
+        print(f"    {_color(str(i), C.CYAN)}) {src.label:<20s} {src.repo}")
+    print()
+    pick = ask("请选择", "1")
+    try:
+        key = keys[int(pick.strip()) - 1]
+    except (ValueError, IndexError):
+        print(f"  {_color('无效选择', C.YELLOW)}")
+        pause()
+        return
+
+    print()
+    print(f"  {_color('渠道', C.BOLD)}：")
+    print(f"    {_color('1', C.CYAN)}) 正式版（stable）")
+    print(f"    {_color('2', C.CYAN)}) 测试版（beta，可能有 bug）")
+    print()
+    channel = "beta" if ask("请选择", "1").strip() == "2" else "stable"
+
+    print()
+    import argparse
+
+    from ..cli import cmd_fetch_manager
+
+    cmd_fetch_manager(
+        argparse.Namespace(
+            source=key,
+            channel=channel,
+            dest="root-work",
+            asset=None,
+            yes=False,
+        )
+    )
+    pause()
+
+
+def _menu_root_rollback(sess: "Session", mon) -> None:
+    """菜单 9：回滚 Root（刷回原厂 init_boot）。"""
+    from pathlib import Path
+
+    from ..device.runner import FastbootRunner
+
+    print()
+    print(f"  {_color('回滚 Root', C.BOLD)}")
+    print()
+
+    workdir = Path("root-work")
+    backups = sorted(workdir.glob("init_boot-stock-*.img")) if workdir.is_dir() else []
+
+    if not backups:
+        print(f"  {_color('root-work/ 里没有找到原厂备份。', C.YELLOW)}")
+        print()
+        print("  可以改用全量包里解出的原厂镜像：")
+        print(f"    {_color('fastboot flash init_boot unpacked/rom/init_boot.img', C.CYAN)}")
+        pause()
+        return
+
+    print("  找到以下原厂备份：")
+    for i, p in enumerate(backups, 1):
+        size_mb = p.stat().st_size / 1024 / 1024
+        print(f"    {_color(str(i), C.CYAN)}) {p.name}  ({size_mb:.1f} MB)")
+    print()
+    pick = ask("请选择要刷回的镜像", "1")
+    try:
+        target = backups[int(pick.strip()) - 1]
+    except (ValueError, IndexError):
+        print(f"  {_color('无效选择', C.YELLOW)}")
+        pause()
+        return
+
+    print()
+    print(f"  即将把 {_color(target.name, C.BOLD)} 刷入 init_boot 分区。")
+    print()
+    print("  注意：")
+    print("    · 刷回后 root 会消失")
+    print("    · 设备需要先进入 fastboot 模式")
+    print()
+    if not confirm("确认回滚？"):
+        print("  已取消。")
+        pause()
+        return
+
+    fb = FastbootRunner()
+    if not fb.devices():
+        print()
+        print(f"  {_color('未检测到 fastboot 设备。', C.YELLOW)}")
+        print("  请先让设备进入 fastboot：")
+        print(f"    {_color('adb reboot bootloader', C.CYAN)}")
+        pause()
+        return
+
+    print()
+    print("  正在刷写…")
+    res = fb.run("flash", "init_boot", str(target), timeout=300)
+    if not fb.ok(res):
+        print(f"  {_color('刷写失败：', C.RED)}")
+        print(f"    {res.combined.strip()}")
+        pause()
+        return
+
+    print(f"  {_color('✓', C.GREEN)} 已刷回原厂镜像")
+    print()
+    print("  请手动重启设备：")
+    print(f"    {_color('fastboot reboot', C.CYAN)}")
     pause()

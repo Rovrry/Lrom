@@ -113,7 +113,7 @@ lrom flash ~/Downloads/rom.zip --images unpacked/rom
 
 | 命令 | 说明 |
 |---|---|
-| `lrom` | 无参数进入交互菜单 |
+| `lrom` | 无参数进入交互菜单（含 Root 一节） |
 | `lrom devices` | 检测连接设备 |
 | `lrom selfcheck` | 环境自检（adb/udev/权限/adb server） |
 | `lrom inspect <包>` | 分析 ROM 包 |
@@ -311,7 +311,7 @@ python3 -m pytest tests/unit -q
 pip install -e ".[dev]"
 ```
 
-测试覆盖（193 个）：
+测试覆盖（197 个）：
 
 | 文件 | 覆盖内容 |
 |---|---|

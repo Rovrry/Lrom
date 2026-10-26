@@ -147,3 +147,80 @@ def test_all_handlers_referenced_in_run_menu():
     ):
         assert fn_name in src, f"run_menu 未注册 {fn_name}"
         assert hasattr(mod, fn_name)
+
+
+# ---------------------------------------------------------------------------
+# Root 菜单项（v0.4.3 新增）
+# ---------------------------------------------------------------------------
+
+
+def test_root_menu_handlers_defined():
+    """Root 三个菜单处理函数必须存在且可调用。"""
+    from lrom.tui import menu
+
+    for name in (
+        "_menu_root",
+        "_menu_fetch_manager",
+        "_menu_root_rollback",
+        "_find_stock_init_boot",
+    ):
+        fn = getattr(menu, name, None)
+        assert fn is not None, f"菜单缺少 {name}"
+        assert callable(fn), f"{name} 不可调用"
+
+
+def test_root_menu_entries_in_dispatch():
+    """菜单分发表必须包含 Root 三项。"""
+    import inspect
+
+    from lrom.tui import menu
+
+    src = inspect.getsource(menu)
+    for item in ('"7": _menu_root', '"8": _menu_fetch_manager', '"9": _menu_root_rollback'):
+        assert item in src, f"分发表缺少 {item}"
+
+
+def test_menu_lists_root_section():
+    """渲染出的菜单必须包含 Root 一节和三个入口。"""
+    from lrom.tui import menu
+
+    class FakeSess:
+        package = None
+        unpacked = None
+        image_dir = None
+        work_dir = "root-work"
+
+    text = menu.build_menu(FakeSess(), True)
+    assert "Root" in text
+    assert "获取 Root" in text
+    assert "下载 Root 管理器" in text
+    assert "回滚 Root" in text
+
+
+def test_menu_entry_count_matches_dispatch():
+    """菜单里编号的项与分发表里的键必须一致（防漏接）。"""
+    import inspect
+    import re
+
+    from lrom.tui import menu
+
+    class FakeSess:
+        package = None
+        unpacked = None
+        image_dir = None
+        work_dir = "root-work"
+
+    text = menu.build_menu(FakeSess(), True)
+    shown = set(re.findall(r"\)\s\S", text))
+    # 从渲染文本里提取"数字)"形式的编号
+    nums = set(re.findall(r"^\s+(\d+)\)", text, re.M)) | set(
+        re.findall(r"\s(\d+)\)\s", text)
+    )
+    nums.discard("0")
+
+    src = inspect.getsource(menu)
+    # 分发表形如  "7": _menu_root   或  "2": lambda s_, m: ...
+    dispatch_block = src[src.index("handlers = {") :]
+    dispatch_block = dispatch_block[: dispatch_block.index("}")]
+    dispatch = set(re.findall(r'"(\d+)":', dispatch_block))
+    assert nums == dispatch, f"菜单编号 {sorted(nums)} 与分发 {sorted(dispatch)} 不一致"
