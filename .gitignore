@@ -37,3 +37,7 @@ payload_properties.txt
 .idea/
 *.swp
 .DS_Store
+
+# 备份文件
+backups/
+plans/
