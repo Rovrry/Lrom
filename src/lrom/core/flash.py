@@ -173,6 +173,7 @@ class FlashExecutor:
         dry_run: bool = False,
         on_step: Callable[[StepResult], None] | None = None,
         on_progress: Callable[[str, int, int], None] | None = None,
+        on_mode_change: Callable[[Phase], None] | None = None,
     ) -> None:
         self.plan = plan
         self.image_dir = image_dir
@@ -181,6 +182,7 @@ class FlashExecutor:
         self.dry_run = dry_run
         self.on_step = on_step
         self.on_progress = on_progress
+        self.on_mode_change = on_mode_change
         self.result = FlashResult(plan=plan)
         self._stop = False
 
@@ -255,44 +257,118 @@ class FlashExecutor:
     def run(self) -> FlashResult:
         self.result.started_at = time.time()
 
-        # 阶段一：Fastboot
+        # ---- 步骤 0：确保设备处于 Fastboot 模式 ----
+        # 设备可能处于 ADB（开机）、已是 Fastboot，或 FastbootD。
+        # 必须先统一到 Fastboot，否则所有 fastboot flash 都会失败。
+        if not self.dry_run:
+            if not self._ensure_fastboot():
+                self.result.error = "无法进入 Fastboot 模式，已中止"
+                self.result.finished_at = time.time()
+                return self.result
+        else:
+            self._notify_mode(Phase.FASTBOOT)
+
+        # ---- 阶段一：Fastboot（物理分区）----
         if not self._run_phase(Phase.FASTBOOT):
             self.result.finished_at = time.time()
             if not self.result.aborted:
                 self.result.error = "Fastboot 阶段失败，已中止"
             return self.result
 
-        # 切换到 FastbootD
+        # ---- 阶段二：FastbootD（逻辑分区）----
         fbd_ops = [op for op in self.plan.active_ops if op.phase is Phase.FASTBOOTD]
         if fbd_ops:
-            if self.dry_run:
-                for op in fbd_ops:
-                    sr = self._flash_one(op)
-                    self.result.steps.append(sr)
-                    if self.on_step:
-                        self.on_step(sr)
-            else:
+            self._notify_mode(Phase.FASTBOOTD)
+            if not self.dry_run:
                 if not self._enter_fastbootd():
                     self.result.error = "无法进入 FastbootD 模式，已中止"
                     self.result.finished_at = time.time()
                     return self.result
 
-                if not self._run_phase(Phase.FASTBOOTD):
-                    self.result.finished_at = time.time()
-                    if not self.result.aborted:
-                        self.result.error = "FastbootD 阶段失败，已中止"
-                    return self.result
+            if not self._run_phase(Phase.FASTBOOTD):
+                self.result.finished_at = time.time()
+                if not self.result.aborted:
+                    self.result.error = "FastbootD 阶段失败，已中止"
+                return self.result
 
         self.result.finished_at = time.time()
         return self.result
 
+    def _notify_mode(self, phase: Phase) -> None:
+        """通知上层当前进入哪个阶段（用于打印分隔）。"""
+        if self.on_mode_change:
+            self.on_mode_change(phase)
+
+    # -- 模式切换 ----------------------------------------------------
+
+    def _ensure_fastboot(self, timeout: float = 180.0) -> bool:
+        """确保设备处于 Fastboot（bootloader）模式。
+
+        - 已在 fastboot：直接返回
+        - 在 adb（开机）：adb reboot bootloader
+        - 在 fastbootd：fastboot reboot bootloader
+        """
+        state = self._detect_mode()
+        if state == "fastboot":
+            return True
+        if state == "fastbootd":
+            # 从 fastbootd 回 bootloader
+            assert self.fb is not None
+            self.fb.run("reboot", "bootloader", timeout=60)
+        elif state == "adb":
+            if self.adb is None:
+                return False
+            res = self.adb.run("reboot", "bootloader", timeout=60)
+            if res.exit_code != 0:
+                return False
+        else:
+            # 什么都没检测到，仍尝试等待（用户可能手动进入了）
+            pass
+        return self._wait_for_fastboot(timeout)
+
+    def _detect_mode(self) -> str:
+        """检测当前设备模式：adb / fastboot / fastbootd / none。"""
+        if self.adb is not None:
+            try:
+                for _serial, st in self.adb.devices().items():
+                    if st == "device":
+                        return "adb"
+            except Exception:
+                pass
+        if self.fb is not None:
+            try:
+                if self.fb.devices():
+                    return "fastbootd" if self.fb.is_fastbootd() else "fastboot"
+            except Exception:
+                pass
+        return "none"
+
+    def _wait_for_fastboot(self, timeout: float) -> bool:
+        """轮询等待设备进入 fastboot 模式。"""
+        assert self.fb is not None
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if self._stop:
+                return False
+            time.sleep(3)
+            try:
+                if self.fb.devices():
+                    if not self.fb.is_fastbootd():
+                        time.sleep(2)  # 给 bootloader 一点时间稳定
+                        return True
+            except Exception:
+                pass
+        return False
+
     def _enter_fastbootd(self, timeout: float = 180.0) -> bool:
-        """切换到 fastbootd 并等待设备就绪。"""
+        """从 fastboot 切换到 fastbootd 并等待就绪。"""
         assert self.fb is not None
         self.fb.run("reboot", "fastboot", timeout=60)
 
         deadline = time.time() + timeout
         while time.time() < deadline:
+            if self._stop:
+                return False
             time.sleep(3)
             try:
                 serials = self.fb.devices()

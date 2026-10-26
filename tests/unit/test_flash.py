@@ -57,7 +57,20 @@ class FakeFastboot:
         return ["FAKE"]
 
     def is_fastbootd(self):
-        return True
+        # 默认视为已在 fastboot（非 fastbootd），这样 _ensure_fastboot 直接通过
+        return self.in_fastbootd
+
+    in_fastbootd = False
+
+
+def make_executor(plan, tmp_path, fb, *, dry_run=False):
+    """构造执行器，并关闭真实的模式切换等待（测试里由 FakeFastboot 直接返回）。"""
+    ex = FlashExecutor(plan, tmp_path, fb=fb, dry_run=dry_run)
+    # 已在 fastboot 模式：_ensure_fastboot 会立即返回 True
+    ex._detect_mode = lambda: "fastboot"
+    # 模拟切换成功，不真的等 180 秒
+    ex._enter_fastbootd = lambda timeout=180.0: True
+    return ex
 
 
 def make_plan(tmp_path, *, with_logical=True):
@@ -89,7 +102,7 @@ def make_plan(tmp_path, *, with_logical=True):
 def test_dry_run_never_calls_flash(tmp_path):
     plan = make_plan(tmp_path)
     fb = FakeFastboot()
-    ex = FlashExecutor(plan, tmp_path, fb=fb, dry_run=True)
+    ex = make_executor(plan, tmp_path, fb, dry_run=True)
     result = ex.run()
 
     assert result.ok
@@ -100,7 +113,7 @@ def test_dry_run_never_calls_flash(tmp_path):
 def test_flash_success_counts_all(tmp_path):
     plan = make_plan(tmp_path)
     fb = FakeFastboot()
-    ex = FlashExecutor(plan, tmp_path, fb=fb, dry_run=False)
+    ex = make_executor(plan, tmp_path, fb)
     result = ex.run()
 
     assert result.ok
@@ -113,7 +126,7 @@ def test_fastboot_exit_zero_but_failed_is_detected(tmp_path):
     """核心安全测试：fastboot 返回 0 但输出 FAILED，必须判定为失败。"""
     plan = make_plan(tmp_path, with_logical=False)
     fb = FakeFastboot(fail_on={"boot"})
-    ex = FlashExecutor(plan, tmp_path, fb=fb, dry_run=False)
+    ex = make_executor(plan, tmp_path, fb)
     result = ex.run()
 
     assert not result.ok
@@ -126,7 +139,7 @@ def test_aborts_on_first_failure(tmp_path):
     """失败后必须立即中止，不能继续刷后面的分区。"""
     plan = make_plan(tmp_path, with_logical=False)
     fb = FakeFastboot(fail_on={"boot"})
-    ex = FlashExecutor(plan, tmp_path, fb=fb, dry_run=False)
+    ex = make_executor(plan, tmp_path, fb)
     result = ex.run()
 
     flashed = [c[1] for c in fb.calls if c and c[0] == "flash"]
@@ -138,7 +151,7 @@ def test_aborts_on_first_failure(tmp_path):
 def test_modem_flashed_last(tmp_path):
     plan = make_plan(tmp_path, with_logical=False)
     fb = FakeFastboot()
-    ex = FlashExecutor(plan, tmp_path, fb=fb, dry_run=False)
+    ex = make_executor(plan, tmp_path, fb)
     ex.run()
 
     flashed = [c[1] for c in fb.calls if c and c[0] == "flash"]
@@ -148,7 +161,7 @@ def test_modem_flashed_last(tmp_path):
 def test_recovery_hint_present_on_failure(tmp_path):
     plan = make_plan(tmp_path, with_logical=False)
     fb = FakeFastboot(fail_on={"boot"})
-    ex = FlashExecutor(plan, tmp_path, fb=fb, dry_run=False)
+    ex = make_executor(plan, tmp_path, fb)
     result = ex.run()
 
     failed = result.failed[0]

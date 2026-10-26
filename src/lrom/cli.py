@@ -540,8 +540,25 @@ def cmd_flash(args: argparse.Namespace) -> int:
     # ---- 7) 执行 ----
     fb = FastbootRunner()
     adb = AdbRunner(server_port=args.adb_port)
+    mode_printed = {"v": None}
+
+    def on_mode_change(phase) -> None:
+        from .core.plan import Phase as _P
+
+        if mode_printed["v"] == phase:
+            return
+        if mode_printed["v"] is not None:
+            print()
+        mode_printed["v"] = phase
+        label = {
+            _P.FASTBOOT: "阶段一：Fastboot（bootloader）",
+            _P.FASTBOOTD: "阶段二：FastbootD（用户空间）",
+        }.get(phase, str(phase))
+        print(paint(f"── {label} ──", C.BOLD))
+
     executor = FlashExecutor(
-        plan, image_dir, fb=fb, adb=adb, dry_run=dry_run
+        plan, image_dir, fb=fb, adb=adb, dry_run=dry_run,
+        on_mode_change=on_mode_change,
     )
 
     print()
@@ -551,21 +568,10 @@ def cmd_flash(args: argparse.Namespace) -> int:
 
     total_bytes = plan.total_bytes
     done_bytes = 0
-    current_phase = None
+
 
     def on_step(sr) -> None:
-        nonlocal done_bytes, current_phase
-        # 阶段提示
-        if sr.partition in {op.partition for op in fb_ops}:
-            if current_phase != "fb":
-                current_phase = "fb"
-                print(paint("── 阶段一：Fastboot ──", C.BOLD))
-        else:
-            if current_phase != "fbd":
-                current_phase = "fbd"
-                print()
-                print(paint("── 阶段二：FastbootD ──", C.BOLD))
-
+        nonlocal done_bytes
         if sr.status is StepStatus.OK:
             done_bytes += sr.size
             pct = done_bytes / total_bytes * 100 if total_bytes else 0
