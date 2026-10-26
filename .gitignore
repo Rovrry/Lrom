@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+.venv/
+venv/
+env/
+
+# Test / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Lrom runtime output
+work/
+*.log
+logs/
+out/
+
+# ROM / firmware artefacts (never commit these)
+*.img
+*.bin
+*.ofp
+*.ops
+*.ozip
+*.ozip2
+*.tgz
+*.zip
+!tests/fixtures/**/*.zip
+payload.bin
+payload_properties.txt
+super_empty.img
+
+# Editors / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
