@@ -196,6 +196,13 @@ def build_parser() -> argparse.ArgumentParser:
     pp.add_argument("--adb-port", type=int, default=None, help="adb server 端口")
     pp.set_defaults(func=cmd_plan)
 
+    pu = sub.add_parser("unpack", help="解包 ROM 中的分区镜像")
+    pu.add_argument("package", type=Path, help="ROM 包路径")
+    pu.add_argument("-o", "--output", type=Path, default=None, help="输出目录")
+    pu.add_argument("--partitions", nargs="+", default=None, help="只解指定分区")
+    pu.add_argument("-q", "--quiet", action="store_true", help="安静模式")
+    pu.set_defaults(func=cmd_unpack)
+
     return p
 
 
@@ -338,4 +345,83 @@ def cmd_plan(args: argparse.Namespace) -> int:
         out = plan.save(Path(args.output))
         print(f"计划已保存: {out}")
         print()
+    return 0
+
+
+def cmd_unpack(args: argparse.Namespace) -> int:
+    """解包 ROM 包中的分区镜像。"""
+    import time as _time
+
+    from .core.package import Severity, Verdict, inspect_package
+    from .core.unpack import unpack_package, write_index
+
+    info = inspect_package(args.package)
+    if info.verdict is not Verdict.FLASHABLE or info.manifest is None:
+        print(paint(f"✗ 该包不能解包: {info.verdict.value}", C.RED + C.BOLD))
+        for f in info.findings:
+            if f.severity in (Severity.BLOCKER, Severity.DANGER):
+                print(f"  {f.message}")
+        return 1
+
+    out_dir = Path(args.output) if args.output else (
+        Path("unpacked") / Path(args.package).stem
+    )
+
+    print()
+    print(paint(f"解包: {Path(args.package).name}", C.BOLD))
+    print(f"  输出目录: {out_dir}")
+    if args.partitions:
+        print(f"  仅解: {', '.join(args.partitions)}")
+    print()
+
+    last_shown = {"name": "", "pct": -10}
+
+    def on_progress(name: str, done: int, total: int) -> None:
+        pct = done / total * 100 if total else 100.0
+        # 每个分区只刷新约 10 次，避免刷屏
+        if last_shown["name"] != name:
+            last_shown["name"] = name
+            last_shown["pct"] = -10
+        if pct - last_shown["pct"] < 10 and pct < 100:
+            return
+        last_shown["pct"] = pct
+        bar_len = 24
+        filled = int(bar_len * pct / 100)
+        bar = "█" * filled + "░" * (bar_len - filled)
+        print(f"\r  {name:<18} {bar} {pct:5.1f}%", end="", flush=True)
+
+    def on_result(res) -> None:
+        print("\r" + " " * 70, end="\r")
+        if res.ok:
+            print(f"  {res.partition:<18} {paint('✓', C.GREEN)} {res.size_mb:>9,.1f} MB")
+        else:
+            print(f"  {res.partition:<18} {paint('✗', C.RED)} {res.error}")
+
+    started = _time.time()
+    results = unpack_package(
+        Path(args.package),
+        out_dir,
+        partitions=args.partitions,
+        progress_cb=on_progress if not args.quiet else None,
+        result_cb=on_result,
+    )
+    elapsed = _time.time() - started
+
+    index = write_index(results, out_dir)
+    ok = [r for r in results if r.ok]
+    bad = [r for r in results if not r.ok]
+
+    print()
+    print(f"  索引: {index}")
+    print(f"  耗时: {elapsed:.1f} 秒")
+    print()
+
+    if bad:
+        print(paint(f"✗ {len(bad)} 个分区解包失败", C.RED + C.BOLD))
+        for r in bad:
+            print(f"  {r.partition}: {r.error}")
+        return 1
+
+    total_gb = sum(r.size for r in ok) / 2**30
+    print(paint(f"✓ 解包完成：{len(ok)} 个分区，{total_gb:.2f} GB", C.GREEN + C.BOLD))
     return 0

@@ -1,0 +1,381 @@
+{
+  "tool": "lrom",
+  "partitions": [
+    {
+      "name": "system",
+      "file": "system.img",
+      "size": 994967552,
+      "sha256": "a467c71b382767a54bf73e320a11aea0c5801aec0b8f829a1fb51f728eee16db",
+      "ok": true,
+      "error": ""
+    },
+    {
+      "name": "system_ext",
+      "file": "system_ext.img",
+      "size": 905129984,
+      "sha256": "5fd536eda7d1e0a67f43556a1a1b5bbc55778eb74e9483766b51969f88294b25",
+      "ok": true,
+      "error": ""
+    },
+    {
+      "name": "product",
+      "file": "product.img",
+      "size": 8949760,
+      "sha256": "70cdb09b0c991807d24eceb490379107602b2740a2605f3e19eee6a82da18efa",
+      "ok": true,
+      "error": ""
+    },
+    {
+      "name": "vbmeta_system",
+      "file": "vbmeta_system.img",
+      "size": 4096,
+      "sha256": "b2f9c464f9da4d0e9503281b606b4af0833b79664041b07a76b8476277d1c1ff",
+      "ok": true,
+      "error": ""
+    },
+    {
+      "name": "boot",
+      "file": "boot.img",
+      "size": 201326592,
+      "sha256": "faf6779dfb471fccfbd709e76f9439435650017178e4a1237b3bddd04e37c464",
+      "ok": true,
+      "error": ""
+    },
+    {
+      "name": "init_boot",
+      "file": "init_boot.img",
+      "size": 8388608,
+      "sha256": "f553f475c9f045685e6ab04b83e8d8a74b442a0d495ef5158743bd08f2d388e4",
+      "ok": true,
+      "error": ""
+    },
+    {
+      "name": "vendor_boot",
+      "file": "vendor_boot.img",
+      "size": 201326592,
+      "sha256": "498b039c200514cb3a6fafa6964a1648197b1220c875b827da6ae2932ccb4f92",
+      "ok": true,
+      "error": ""
+    },
+    {
+      "name": "recovery",
+      "file": "recovery.img",
+      "size": 104857600,
+      "sha256": "329fe065b099d1072c8425e572699f3fba6c2fca26c29bbf8a0753808646ee66",
+      "ok": true,
+      "error": ""
+    },
+    {
+      "name": "vendor",
+      "file": "vendor.img",
+      "size": 799891456,
+      "sha256": "5a1036b1a87de0b4329221dfe13f27299b83c36ddf3e13c9ed298465d291f82e",
+      "ok": true,
+      "error": ""
+    },
+    {
+      "name": "vendor_dlkm",
+      "file": "vendor_dlkm.img",
+      "size": 48648192,
+      "sha256": "5254e8b7e56ddc38da9b92514b14b44b74a3ed34613b318f12369ab626e030b0",
+      "ok": true,
+      "error": ""
+    },
+    {
+      "name": "system_dlkm",
+      "file": "system_dlkm.img",
+      "size": 14544896,
+      "sha256": "ef8bb35c7611342f8831ef4ae435b6f610d02b3d39d51289598cab11a4483a5a",
+      "ok": true,
+      "error": ""
+    },
+    {
+      "name": "odm",
+      "file": "odm.img",
+      "size": 1627066368,
+      "sha256": "2991d1a1f471ca2ed785daad473df1d950954c5089b1922724d1e5f17635b071",
+      "ok": true,
+      "error": ""
+    },
+    {
+      "name": "dtbo",
+      "file": "dtbo.img",
+      "size": 25165824,
+      "sha256": "3b98e45fc731cb74abf76b52ba0f720812c9723ca84366c47f83c86da92226a4",
+      "ok": true,
+      "error": ""
+    },
+    {
+      "name": "vbmeta",
+      "file": "vbmeta.img",
+      "size": 12288,
+      "sha256": "90357a7595fa1ceef8cbb4386225d337b21efe0ccef87971e36f8dc1b0c0d869",
+      "ok": true,
+      "error": ""
+    },
+    {
+      "name": "abl",
+      "file": "abl.img",
+      "size": 278528,
+      "sha256": "e4a7ed5a7756701b676a903df666b2f34c28b642707de3e497616bac58361140",
+      "ok": true,
+      "error": ""
+    },
+    {
+      "name": "aop",
+      "file": "aop.img",
+      "size": 335872,
+      "sha256": "c93765a1c5fb70e96d2f4b3c810a3b7b877fcdfc4669f9b78e0b7bdb31cf5c8b",
+      "ok": true,
+      "error": ""
+    },
+    {
+      "name": "aop_config",
+      "file": "aop_config.img",
+      "size": 28672,
+      "sha256": "d9f99268c3f8ec9b7929ac721271499cd9f581162643ced87463e94e6881b16f",
+      "ok": true,
+      "error": ""
+    },
+    {
+      "name": "bluetooth",
+      "file": "bluetooth.img",
+      "size": 1454080,
+      "sha256": "25cf2db67bfb56520b869ef97d40875b6ed5e441ef866e8c0a3575071e62c6fa",
+      "ok": true,
+      "error": ""
+    },
+    {
+      "name": "cpucp",
+      "file": "cpucp.img",
+      "size": 253952,
+      "sha256": "fff99341ce3d48f71ee97f02660f817b062db092b7f5fb3a46447acb4c853bf4",
+      "ok": true,
+      "error": ""
+    },
+    {
+      "name": "devcfg",
+      "file": "devcfg.img",
+      "size": 61440,
+      "sha256": "ba3d8bf5b66ee4f9932abc93f37242b2f2464aeed0382ea77fc6fe960de15ae1",
+      "ok": true,
+      "error": ""
+    },
+    {
+      "name": "dsp",
+      "file": "dsp.img",
+      "size": 67108864,
+      "sha256": "416d03a3d335b6d549cf61bdbe1ed223fd1739f1d6c16b48caddd9bfc5ee840d",
+      "ok": true,
+      "error": ""
+    },
+    {
+      "name": "engineering_cdt",
+      "file": "engineering_cdt.img",
+      "size": 1048576,
+      "sha256": "6d427b467e7e140f99a5883ea007f0274eda5979a3b59bf9da596568c9d907ea",
+      "ok": true,
+      "error": ""
+    },
+    {
+      "name": "featenabler",
+      "file": "featenabler.img",
+      "size": 106496,
+      "sha256": "ddd41f85ba3d2e1f88e21b9e5435a2e4bd01904206dc9fb34e6f78fd8ee3aa12",
+      "ok": true,
+      "error": ""
+    },
+    {
+      "name": "hyp",
+      "file": "hyp.img",
+      "size": 1642496,
+      "sha256": "1d4554ffaa091d10b1498a9e8c76840cfa2f10f0583a7ac5b00cf1bce26e3e9a",
+      "ok": true,
+      "error": ""
+    },
+    {
+      "name": "imagefv",
+      "file": "imagefv.img",
+      "size": 106496,
+      "sha256": "41ec1a04e8aa106aa44f4847a53a031b5d3ebc98c6d6dba2051ad7cafe30112d",
+      "ok": true,
+      "error": ""
+    },
+    {
+      "name": "keymaster",
+      "file": "keymaster.img",
+      "size": 430080,
+      "sha256": "794be07d68ff3ba9ec155bbf18cdc58ec869c66325d3f304552656c6c377624a",
+      "ok": true,
+      "error": ""
+    },
+    {
+      "name": "modem",
+      "file": "modem.img",
+      "size": 96153600,
+      "sha256": "641cc93e9e1663f2a6b17126ac26a75f90099184e1fb558b97d85d857e668790",
+      "ok": true,
+      "error": ""
+    },
+    {
+      "name": "oplus_sec",
+      "file": "oplus_sec.img",
+      "size": 872448,
+      "sha256": "a0e38b10a38946e7b52f336a342790baea5adef513a054a0d79aec94550011a6",
+      "ok": true,
+      "error": ""
+    },
+    {
+      "name": "qupfw",
+      "file": "qupfw.img",
+      "size": 61440,
+      "sha256": "53b0d419d7cecdd1fc13e6d34e032ac07858a6373c4f4c9c79d3b06ee57dd425",
+      "ok": true,
+      "error": ""
+    },
+    {
+      "name": "shrm",
+      "file": "shrm.img",
+      "size": 139264,
+      "sha256": "d77c65fa19bc3dd2382136852d507af60928f3d94ac9cfdaa33a266c9d202a55",
+      "ok": true,
+      "error": ""
+    },
+    {
+      "name": "splash",
+      "file": "splash.img",
+      "size": 15298560,
+      "sha256": "717e9ca34ca5ac1dc08d91660e09c5443fd3c9fa0bcf79cdaa7d84b3431b6510",
+      "ok": true,
+      "error": ""
+    },
+    {
+      "name": "tz",
+      "file": "tz.img",
+      "size": 4141056,
+      "sha256": "70361709872367e2c6b4c3e5b450218611e81c6f48849d176e3c0a2dcd81b91d",
+      "ok": true,
+      "error": ""
+    },
+    {
+      "name": "uefi",
+      "file": "uefi.img",
+      "size": 3158016,
+      "sha256": "f37513aba5fe702f9a60d42de7d5a8b4637b536cee3b6b79cf68d70c812ce494",
+      "ok": true,
+      "error": ""
+    },
+    {
+      "name": "uefisecapp",
+      "file": "uefisecapp.img",
+      "size": 200704,
+      "sha256": "f4546ed731ef04e3f02deff5af852a9ff52132b58b85424c952a60be7c748f59",
+      "ok": true,
+      "error": ""
+    },
+    {
+      "name": "cpucp_dtb",
+      "file": "cpucp_dtb.img",
+      "size": 16384,
+      "sha256": "4a4f589af363547b34c53a028451303b3756345b646e382c27228bcd6b82d1a6",
+      "ok": true,
+      "error": ""
+    },
+    {
+      "name": "vbmeta_vendor",
+      "file": "vbmeta_vendor.img",
+      "size": 4096,
+      "sha256": "26809e3cbd82bc58f628e3f395dd446923ffc73efb8f6def62e5ec5d971b856a",
+      "ok": true,
+      "error": ""
+    },
+    {
+      "name": "xbl",
+      "file": "xbl.img",
+      "size": 1118208,
+      "sha256": "1f53497d4236972f99a0f3b0e6502b5b5d08da633e104d57bdcc0dbd068d38c7",
+      "ok": true,
+      "error": ""
+    },
+    {
+      "name": "xbl_config",
+      "file": "xbl_config.img",
+      "size": 237568,
+      "sha256": "b5c56224dcae6763d18bdc566ad21c4934f41269c9a4f56ecb5b84147292be60",
+      "ok": true,
+      "error": ""
+    },
+    {
+      "name": "xbl_ramdump",
+      "file": "xbl_ramdump.img",
+      "size": 909312,
+      "sha256": "0543272a715b098a58c5b08bd6036d7aaf571a1e734fa10882bcc6b60c323cc3",
+      "ok": true,
+      "error": ""
+    },
+    {
+      "name": "my_product",
+      "file": "my_product.img",
+      "size": 1397407744,
+      "sha256": "df9d30f056e08017f94d9c475de71e8b976a1a4d06f05f5e532c2a8369a955bd",
+      "ok": true,
+      "error": ""
+    },
+    {
+      "name": "my_engineering",
+      "file": "my_engineering.img",
+      "size": 335872,
+      "sha256": "ff536859b3b44e367e0ecd96e3a38d32c66f397c337c9a5129410260f412dfdb",
+      "ok": true,
+      "error": ""
+    },
+    {
+      "name": "my_stock",
+      "file": "my_stock.img",
+      "size": 3830992896,
+      "sha256": "81acdcc4f247ac45425daa81fac79b6e71156f99cdbea8061593abdbcecee419",
+      "ok": true,
+      "error": ""
+    },
+    {
+      "name": "my_carrier",
+      "file": "my_carrier.img",
+      "size": 335872,
+      "sha256": "9b79ca3787f86cb1513a8f56573f77563a49cccae54026f7da6fee6e2fedcc1c",
+      "ok": true,
+      "error": ""
+    },
+    {
+      "name": "my_region",
+      "file": "my_region.img",
+      "size": 3289088,
+      "sha256": "b254187edbbcf9407e36ae1f0e4eec725f348e5081a1035dd682fbe45d257f1c",
+      "ok": true,
+      "error": ""
+    },
+    {
+      "name": "my_bigball",
+      "file": "my_bigball.img",
+      "size": 335872,
+      "sha256": "41ee31050d769c20c4c77e31549d9c7f978170e1a5a60fe92bdcbd5ff5cb5000",
+      "ok": true,
+      "error": ""
+    },
+    {
+      "name": "my_heytap",
+      "file": "my_heytap.img",
+      "size": 335872,
+      "sha256": "613d09688b0447ef6f0c4ebf07bf169708af5cbfabb65ba7fb29fbaee1a682ca",
+      "ok": true,
+      "error": ""
+    },
+    {
+      "name": "my_manifest",
+      "file": "my_manifest.img",
+      "size": 802816,
+      "sha256": "b2dc58a1a6bd6159d1607fafc294ddffe503e40c4b322db39ac5518fbe746818",
+      "ok": true,
+      "error": ""
+    }
+  ]
+}
