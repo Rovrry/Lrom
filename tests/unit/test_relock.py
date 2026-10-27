@@ -216,3 +216,81 @@ def test_relock_refuses_when_lock_state_unknown(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert rc == 1
     assert "无法确认" in out
+
+
+# ---------------------------------------------------------------------------
+# 包适配性：跨区/第三方包回锁必砖
+# ---------------------------------------------------------------------------
+
+
+def test_suitability_ok_same_model():
+    from lrom.core.relock import PackageSuitability, check_package_suitability
+
+    suit, reasons = check_package_suitability(
+        pkg_product_name="OPD2404",
+        pkg_pre_device="OP5D77L1",
+        pkg_is_full_ota=True,
+        device_model="OPD2404",
+        device_codename="OP5D77L1",
+    )
+    assert suit is PackageSuitability.OK
+    assert reasons == []
+
+
+def test_suitability_wrong_model_blocked():
+    """异机型/跨区包 → WRONG_MODEL，回锁必砖。"""
+    from lrom.core.relock import PackageSuitability, check_package_suitability
+
+    suit, reasons = check_package_suitability(
+        pkg_product_name="OPD2404",
+        pkg_pre_device="OP5D77L1",
+        pkg_is_full_ota=True,
+        device_model="PLK110",  # 一加 15
+        device_codename="PLK110",
+    )
+    assert suit is PackageSuitability.WRONG_MODEL
+    assert any("机型不符" in r for r in reasons)
+
+
+def test_suitability_delta_not_allowed():
+    """增量包不能用于回锁。"""
+    from lrom.core.relock import PackageSuitability, check_package_suitability
+
+    suit, reasons = check_package_suitability(
+        pkg_product_name="OPD2404",
+        pkg_pre_device="OP5D77L1",
+        pkg_is_full_ota=False,
+        device_model="OPD2404",
+        device_codename="OP5D77L1",
+    )
+    assert suit is PackageSuitability.NOT_OFFICIAL
+    assert any("全量" in r for r in reasons)
+
+
+def test_suitability_unknown_model_blocked():
+    """读不到包机型 → UNKNOWN，拒绝（不能赌）。"""
+    from lrom.core.relock import PackageSuitability, check_package_suitability
+
+    suit, reasons = check_package_suitability(
+        pkg_product_name=None,
+        pkg_pre_device=None,
+        pkg_is_full_ota=True,
+        device_model="OPD2404",
+        device_codename="OP5D77L1",
+    )
+    assert suit is PackageSuitability.UNKNOWN
+    assert any("读不到" in r for r in reasons)
+
+
+def test_suitability_matches_by_codename_only():
+    """product_name 缺失但 pre_device 匹配，也算 OK。"""
+    from lrom.core.relock import PackageSuitability, check_package_suitability
+
+    suit, _ = check_package_suitability(
+        pkg_product_name=None,
+        pkg_pre_device="OP5D77L1",
+        pkg_is_full_ota=True,
+        device_model="OPD2404",
+        device_codename="OP5D77L1",
+    )
+    assert suit is PackageSuitability.OK

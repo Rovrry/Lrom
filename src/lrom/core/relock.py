@@ -39,6 +39,8 @@ __all__ = [
     "RelockStage",
     "RelockCheck",
     "RelockPlan",
+    "PackageSuitability",
+    "check_package_suitability",
     "build_relock_plan",
     "verify_two_pass",
 ]
@@ -188,3 +190,63 @@ def verify_two_pass(
         pass_a_version=pass_a_version,
         pass_b_version=pass_b_version,
     )
+
+
+# ---------------------------------------------------------------------------
+# 包适配性校验（跨区 / 第三方包回锁 = 必砖）
+# ---------------------------------------------------------------------------
+
+
+class PackageSuitability(Enum):
+    """回锁用包的适配性。"""
+
+    OK = "ok"                    # 官方包、同机型，可以用
+    WRONG_MODEL = "wrong_model"  # 包与设备机型不符
+    NOT_OFFICIAL = "not_official"  # 不是全量官方包（增量/结构异常）
+    UNKNOWN = "unknown"          # 读不到机型信息，无法确认
+
+
+def check_package_suitability(
+    *,
+    pkg_product_name: str | None,
+    pkg_pre_device: str | None,
+    pkg_is_full_ota: bool,
+    device_model: str | None,
+    device_codename: str | None,
+) -> tuple[PackageSuitability, list[str]]:
+    """检查回锁用的包是否适合本机。
+
+    回锁的本质风险（见社区实测）：**任一分区不是本机原厂签名就砖**。
+    "平刷两遍"只能保证两槽一致，**不能**保证是原厂签名 —— 跨区包 /
+    第三方包就算刷两遍，签名仍对不上，回锁必砖。
+
+    所以回锁前必须确认：包是**同机型的完整官方包**。
+
+    返回 (结论, 原因列表)。
+    """
+    reasons: list[str] = []
+
+    if not pkg_is_full_ota:
+        return (
+            PackageSuitability.NOT_OFFICIAL,
+            ["该包不是完整全量 OTA 包（可能是增量包或结构异常），不能用于回锁"],
+        )
+
+    if not (pkg_product_name or pkg_pre_device):
+        return (
+            PackageSuitability.UNKNOWN,
+            ["读不到包的机型信息，无法确认是本机官方包，回锁需绝对确定"],
+        )
+
+    # 机型核对：product_name 或 pre_device 任一与设备匹配即可
+    dev_keys = {k.upper() for k in (device_model, device_codename) if k}
+    pkg_keys = {k.upper() for k in (pkg_product_name, pkg_pre_device) if k}
+
+    if dev_keys and pkg_keys and not (dev_keys & pkg_keys):
+        reasons.append(
+            f"包与设备机型不符：包={sorted(pkg_keys)}，设备={sorted(dev_keys)}。"
+            "跨区/异机型包回锁必砖（签名对不上）"
+        )
+        return (PackageSuitability.WRONG_MODEL, reasons)
+
+    return (PackageSuitability.OK, [])

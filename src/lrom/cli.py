@@ -1159,8 +1159,13 @@ def cmd_relock(args: argparse.Namespace) -> int:
     """
     import argparse as _ap
 
-    from .core.package import Verdict, inspect_package
-    from .core.relock import build_relock_plan, verify_two_pass
+    from .core.package import PackageKind, Verdict, inspect_package
+    from .core.relock import (
+        PackageSuitability,
+        build_relock_plan,
+        check_package_suitability,
+        verify_two_pass,
+    )
     from .device.discover import DeviceMode, detect
     from .device.runner import FastbootRunner
 
@@ -1175,6 +1180,9 @@ def cmd_relock(args: argparse.Namespace) -> int:
     print("  Lrom 会先平刷两次完整系统包（A 槽、B 槽各一遍），")
     print("  只有两次都成功且分区一致时才允许回锁。")
     print()
+    print(paint("  注意：平刷两遍保证的是「两槽一致」，不保证「是原厂签名」。", C.YELLOW))
+    print(paint("  跨区包 / 第三方包即使刷两遍，签名仍对不上，回锁必砖。", C.YELLOW))
+    print()
 
     pkg = args.package
     info = inspect_package(pkg)
@@ -1187,7 +1195,7 @@ def cmd_relock(args: argparse.Namespace) -> int:
     pkg_partitions = {p.name for p in info.manifest.partitions}
     pkg_version = info.version_name
 
-    # ---- 1) 设备状态 ----
+    # ---- 1) 设备状态（先于包适配性检查，因为要用设备机型做比对）----
     dev = detect(adb_server_port=getattr(args, "adb_port", None))
     if dev is None:
         print(paint("  ⛔ 未检测到设备。", C.RED))
@@ -1208,6 +1216,24 @@ def cmd_relock(args: argparse.Namespace) -> int:
         print()
         return 1
 
+    # ---- 1.5) 包适配性：必须是同机型完整官方包 ----
+    suit, suit_reasons = check_package_suitability(
+        pkg_product_name=info.product_name,
+        pkg_pre_device=info.pre_device,
+        pkg_is_full_ota=(info.kind is PackageKind.OTA_FULL),
+        device_model=dev.model,
+        device_codename=dev.codename,
+    )
+    if suit is not PackageSuitability.OK:
+        print(paint("  ⛔ 回锁包校验未通过，拒绝继续：", C.RED + C.BOLD))
+        for r in suit_reasons:
+            print(f"     · {r}")
+        print()
+        print("  回锁要求：同机型的完整官方全量包。")
+        print()
+        return 1
+    print(paint("  ✓ 包校验：同机型完整官方全量包", C.GREEN))
+
     plan = build_relock_plan(
         device_model=dev.model or "",
         device_codename=dev.codename or "",
@@ -1223,10 +1249,25 @@ def cmd_relock(args: argparse.Namespace) -> int:
     if not getattr(args, "yes", False):
         from .tui.menu import confirm
 
-        print(paint("  ⚠ 即将开始：平刷两次系统包，然后回锁。", C.RED + C.BOLD))
-        print("     期间请勿断电、勿拔线。回锁会清空全部用户数据。")
+        # 逐项确认清单（源自社区实测的必砖场景）
+        print(paint("  回锁前逐项确认（缺一不可）：", C.BOLD))
+        print("    □ 系统已彻底回归原厂：boot / init_boot 是未 patch 的原厂镜像")
+        print("    □ root 已完全移除（Magisk / KernelSU / APatch 都不在了）")
+        print("    □ recovery 是原厂的（不是 TWRP 等第三方）")
+        print("    □ vbmeta 是原厂的，没有 disable-verification")
+        print("    □ 刷入的是【与本机机型/区域一致】的官方全量包")
+        print("    □ 已备份 ocdt / persist（回锁失败时这些是最后救命稻草）")
+        print("    □ 电量 > 50%，使用原装数据线，直连 USB")
         print()
-        if not confirm("确认开始回锁流程？（输入 FLASH 确认）", "FLASH"):
+        print(paint("  ⚠ 特别注意（社区实测必砖场景）：", C.YELLOW + C.BOLD))
+        print("    · 非官方手段解锁过的设备（ocdt 签名被抹）→ 回锁基本不可能")
+        print("    · 跨区包 / 第三方 ROM 回锁 → 签名对不上，必砖")
+        print("    · 已 ARB 熔断 / 9008 已失效的机型 → 回锁后出事无自救通道")
+        print()
+        print(paint("  回锁会清空全部用户数据，期间请勿断电、勿拔线。", C.RED))
+        print()
+
+        if not confirm("已确认以上全部事项，输入 FLASH 开始回锁：", "FLASH"):
             print("  已取消。")
             print()
             return 1
