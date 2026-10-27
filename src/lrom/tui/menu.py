@@ -689,12 +689,22 @@ def _flow_unpack(sess: Session, mon) -> None:
             print()
             print(
                 _color(
-                    f"  ⚠ 型号不一致：包要求 {info.pre_device}，"
-                    f"设备是 {snap.codename}",
+                    f"  ⚠ 这不是当前设备的 ROM 包",
                     C.RED + C.BOLD,
                 )
             )
-            if not confirm("型号不匹配，仍要解包吗？"):
+            dev_name = snap.model or snap.codename
+            print(f"    当前设备 : {dev_name}（代号 {snap.codename}）")
+            print(f"    包适用   : {info.product_name or '?'}（代号 {info.pre_device}）")
+            print()
+            print(
+                _color(
+                    "    解包只是拆文件、不写设备，可以先解出来看；\n"
+                    "    但刷写时会被拒绝 —— 刷入其他机型的包会直接变砖。",
+                    C.YELLOW,
+                )
+            )
+            if not confirm("仍然解包吗？"):
                 return
         else:
             print(f"    {_color('✓', C.GREEN)} 型号匹配: {snap.codename}")

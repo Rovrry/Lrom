@@ -711,16 +711,40 @@ def cmd_flash(args: argparse.Namespace) -> int:
         print(paint("✗ 未检测到设备", C.RED))
         return 1
 
+    # ---- 2.2) 型号一致性检查（必须在 ARB 之前）----
+    # 为什么排最前：ARB 判定要拿「设备型号」去查熔断表。若设备与包
+    # 根本不是同一机型（如拿一加 15 刷平板包），继续按包的型号判 ARB
+    # 会得出「这台平板在降级」的荒唐结论，理由完全错误。
+    # 先用设备侧真实标识核对，不一致就直接挡在这里。
+    if dev.mode is DeviceMode.ADB:
+        _match = check_device_match(info, dev.codename or "", dev.model)
+        _blockers = [f for f in _match if f.severity is Severity.BLOCKER]
+        if _blockers:
+            print(paint("✗ 机型与 ROM 包不匹配，拒绝刷写", C.RED + C.BOLD))
+            print()
+            print(f"  设备    : {dev.model or '?'}（代号 {dev.codename or '?'}）")
+            if info.product_name:
+                print(f"  包要求  : {info.product_name}（代号 {info.pre_device or '?'}）")
+            print()
+            for f in _blockers:
+                print(f"  · {f.message}")
+            print()
+            print("  请确认 ROM 包与当前连接的设备是同一机型后再刷。")
+            print("  刷入其他机型的包会直接导致设备无法开机。")
+            print()
+            return 1
+
     # ---- 2.3) ARB 熔断机型检查 ----
     # 这是最后一道兜底：用户可能没跑 `lrom arb` 就直接 flash。
     # 硬编码的熔断表能在这种情况下拦住「降级到熔断前版本」这个
     # 最常见的黑砖场景。
+    # 注意：到这里机型一致性已确认，用设备侧标识查才准确。
     from .core.arb_db import ArbRisk, check_arb_risk, format_arb_check
 
     arb_result = check_arb_risk(
         package_version=info.version_name,
         device_version=dev.build_id,
-        model_code=info.product_name,
+        model_code=dev.model or info.product_name,
         codename=dev.codename or info.pre_device,
     )
     if arb_result.risk is ArbRisk.BLOCK:
@@ -779,13 +803,7 @@ def cmd_flash(args: argparse.Namespace) -> int:
 
     device_parts: set[str] = set()
     if dev.mode is DeviceMode.ADB:
-        findings = check_device_match(info, dev.codename or "", dev.model)
-        blockers = [f for f in findings if f.severity is Severity.BLOCKER]
-        if blockers:
-            print(paint("✗ 型号不匹配，拒绝刷写", C.RED + C.BOLD))
-            for f in blockers:
-                print(f"  {f.message}")
-            return 1
+        # 型号一致性与 ARB 已在 2.2 / 2.3 检查过，这里只取分区列表
         adb = AdbRunner(server_port=args.adb_port)
         device_parts = list_partitions(adb, dev.serial)
     else:
