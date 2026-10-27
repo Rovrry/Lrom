@@ -2,6 +2,34 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.7.6] - 2026-10-28
+
+### 改进：回锁时提示设备端确认界面
+
+**现象**（真机实测）：点回锁后 Lrom 停在原地，设备屏幕显示：
+
+```
+do not lock the bootloader
+lock the bootloader
+```
+
+这不是 Lrom 卡死——`fastboot flashing lock` 会触发 bootloader 的原生
+物理确认界面，需要用户手动用音量键选择、电源键确认。之前 Lrom 没有
+任何提示，用户以为卡住了。
+
+**修正**：执行 `fastboot flashing lock` 前打印明确指引：
+
+- 屏幕上会看到 `do not lock the bootloader`（上）/ `lock the bootloader`（下）
+- 用**音量键**选到 `lock the bootloader`，按**电源键**确认
+- 选错（留在 do not lock）会取消回锁
+
+回锁失败时的提示也补上了「可能选了 do not lock（取消）」这一常见原因。
+
+键位方向已查证（社区实测）：高通机型用音量下键把光标移到
+LOCK THE BOOTLOADER，再按电源键确认。
+
+测试 376 -> 378。
+
 ## [0.7.5] - 2026-10-28
 
 ### 修复：Ctrl+C 中断时甩出 Python traceback

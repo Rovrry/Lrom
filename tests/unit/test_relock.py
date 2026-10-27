@@ -438,3 +438,55 @@ def test_skip_flash_only_calls_lock(monkeypatch):
     rc = cli.cmd_relock(_ns(dry_run=False, yes=True, skip_flash=True))
     assert rc == 0
     assert calls == [("flashing", "lock")]
+
+
+# ---------------------------------------------------------------------------
+# 设备端确认界面提示（fastboot flashing lock 会停在 bootloader 原生界面）
+# ---------------------------------------------------------------------------
+
+
+def test_lock_device_prompt_mentions_volume_and_power(capsys):
+    """执行 lock 前必须提示用户在设备端用音量键+电源键确认。
+
+    否则用户会以为 Lrom 卡死在 "do not lock / lock the bootloader" 界面。
+    """
+    import lrom.cli as cli
+
+    cli._print_lock_device_prompt()
+    out = capsys.readouterr().out
+    assert "lock the bootloader" in out
+    assert "do not lock" in out
+    assert "音量" in out
+    assert "电源" in out
+
+
+def test_lock_failure_mentions_do_not_lock(monkeypatch, capsys):
+    """回锁失败时提示可能选了 do not lock（取消）。"""
+    import lrom.cli as cli
+    import lrom.device.discover as disc
+    import lrom.core.package as pkg
+    import lrom.device.runner as runner_mod
+
+    fake = SimpleNamespace(
+        verdict=pkg.Verdict.FLASHABLE,
+        manifest=SimpleNamespace(partitions=[SimpleNamespace(name="boot")]),
+        product_name="OPD2404", pre_device="OP5D77L1", version_name="16.0.5.1201",
+        kind=pkg.PackageKind.OTA_FULL,
+    )
+    monkeypatch.setattr(pkg, "inspect_package", lambda p: fake)
+    monkeypatch.setattr(disc, "detect", lambda adb_server_port=None: SimpleNamespace(
+        mode=disc.DeviceMode.FASTBOOT, locked="0", model="OPD2404",
+        codename="OP5D77L1", slot="a", serial="S1"))
+
+    class _FailFB:
+        def __init__(self, *a, **k): pass
+        def run(self, *a, **k):
+            return SimpleNamespace(exit_code=1, stdout="", stderr="FAILED", combined="FAILED")
+        def ok(self, r): return False
+
+    monkeypatch.setattr(runner_mod, "FastbootRunner", _FailFB)
+
+    rc = cli.cmd_relock(_ns(dry_run=False, yes=True, skip_flash=True))
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "do not lock" in out

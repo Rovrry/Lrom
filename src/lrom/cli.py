@@ -1178,6 +1178,24 @@ def _print_after_flash_notice(arb_cmp, *, wipe: bool) -> None:
     print()
 
 
+def _print_lock_device_prompt() -> None:
+    """提示用户在设备端确认回锁（一加/高通 bootloader 的物理确认界面）。
+
+    fastboot flashing lock 会触发设备 bootloader 的原生确认界面，
+    需要用户用音量键选择、电源键确认。Lrom 在这里卡住等，不是死机。
+    """
+    print()
+    print(paint("  ⚠ 请立即看设备屏幕：bootloader 会弹出确认界面", C.YELLOW + C.BOLD))
+    print("     · 屏幕上会出现           do not lock the bootloader")
+    print("                              lock the bootloader")
+    print("     · 用【音量键】选到      lock the bootloader（第二个/下方）")
+    print("     · 按【电源键】确认")
+    print()
+    print(paint("     选错（留在 do not lock）会取消回锁，设备保持解锁。", C.DIM))
+    print("     此时 Lrom 正在等待你的确认，屏幕上不要选 do not lock。")
+    print()
+
+
 def cmd_relock(args: argparse.Namespace) -> int:
     """BL 回锁 —— 最高风险操作。
 
@@ -1407,11 +1425,12 @@ def cmd_relock(args: argparse.Namespace) -> int:
         print(paint("  已跳过平刷（按你的选择，假定两槽已是原厂系统）", C.YELLOW))
         print("  仍会做包适配性与设备状态校验，然后直接回锁。")
         print()
-        print(paint(f"  确认后直接执行 fastboot flashing lock…", C.CYAN))
+        _print_lock_device_prompt()
         res = fb.run("flashing", "lock", timeout=300)
         if not fb.ok(res):
             print(paint(f"  ⛔ 回锁命令失败：{res.combined.strip()[:200]}", C.RED + C.BOLD))
-            print("     设备可能仍处于解锁状态，请检查后重试。")
+            print("     常见原因：设备端选了 do not lock（取消回锁），或镜像非原厂签名。")
+            print("     设备仍解锁，可重新运行本命令再试。")
             print()
             return 1
         print()
@@ -1477,13 +1496,13 @@ def cmd_relock(args: argparse.Namespace) -> int:
         return 1
 
     # ---- 7) 回锁 ----
-    print()
-    print(paint("  正在执行回锁：fastboot flashing lock", C.CYAN + C.BOLD))
-    print(paint("  回锁会清空数据并重启，请勿中断…", C.YELLOW))
+    print(paint("  回锁会清空数据并重启，请勿中断。", C.YELLOW))
+    _print_lock_device_prompt()
     res = fb.run("flashing", "lock", timeout=300)
     if not fb.ok(res):
         print(paint(f"  ⛔ 回锁命令失败：{res.combined.strip()[:200]}", C.RED + C.BOLD))
-        print("     设备可能仍处于解锁状态，请检查后重试。")
+        print("     常见原因：设备端选了 do not lock（取消回锁），或镜像非原厂签名。")
+        print("     设备仍解锁，可重新运行本命令再试。")
         print()
         return 1
 
