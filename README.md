@@ -320,8 +320,15 @@ fastboot reboot      # 当前在 fastboot
 
 ## 开发
 
-架构说明、踩坑记录与技术决策见 [docs/ROOT-IMPLEMENTATION.md](docs/ROOT-IMPLEMENTATION.md)
-（自动化 root 部分的完整实现方法）。
+开发相关文档：
+
+- **[docs/DEVNOTES.md](docs/DEVNOTES.md)** —— 踩坑记录、开发规范、待办清单
+- **[docs/ROOT-IMPLEMENTATION.md](docs/ROOT-IMPLEMENTATION.md)** —— 自动化 root 的完整实现方法
+- **[docs/research/](docs/research/)** —— root 方案调研（KernelSU / Magisk / 欧加设备）
+- **[docs/ARB-实验报告.md](docs/ARB-实验报告.md)** —— ARB 熔断对照实验
+
+> ⚠️ **提交前请自查敏感信息**：设备序列号、本机路径、邮箱、token 一律不入库。
+> 详见 [DEVNOTES.md 第 1.9 节](docs/DEVNOTES.md)。
 
 ```bash
 # 运行测试
