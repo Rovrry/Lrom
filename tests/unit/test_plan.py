@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
+import pytest
+
 from lrom.core.payload import OpType
 from lrom.core.plan import (
     DANGER_PARTITIONS,
@@ -134,3 +138,60 @@ def test_critical_sets_do_not_overlap():
     """安全性断言：永不可覆盖与危险分区集合不应重叠。"""
     assert not (NEVER_OVERWRITE & OPLUS_LOGICAL_PARTITIONS)
     assert not (NEVER_OVERWRITE & DANGER_PARTITIONS)
+
+
+# ---------------------------------------------------------------------------
+# OCDT / 校准分区的警告等级（社区资料对照）
+# ---------------------------------------------------------------------------
+
+
+def test_engineering_cdt_is_warn_not_safe():
+    """OCDT 是机独有校准分区，不能当普通分区静默刷。
+
+    社区资料（一加线刷分区清单）标它为红线：用非本机的会进不了 Fastboot，
+    损坏后售后也无法修复。备份清单里有它，但刷写时须明确警告。
+    """
+    from lrom.core.plan import WARN_PARTITIONS
+
+    assert "engineering_cdt" in WARN_PARTITIONS
+    assert "ocdt" in WARN_PARTITIONS
+
+
+def test_oplusstanvbk_is_warn():
+    """欧加 AVB 备份分区也须提醒。"""
+    from lrom.core.plan import WARN_PARTITIONS
+
+    assert "oplusstanvbk" in WARN_PARTITIONS
+
+
+def test_preflight_flags_ocdt():
+    """预演报告必须对 OCDT 单独给一条警告。"""
+    from lrom.core.flash import preflight
+
+    mf = manifest_of(
+        make_partition("engineering_cdt", [make_op(OpType.REPLACE_XZ, data_length=100)]),
+        make_partition("boot", [make_op(OpType.REPLACE_XZ, data_length=100)]),
+    )
+    plan = build_plan(mf, package_path="x.zip", device_model="OPD2404", slot="a")
+    issues = preflight(plan, Path("/tmp"), super_size=None)
+    msgs = " ".join(i.message for i in issues)
+    assert "OCDT" in msgs or "engineering_cdt" in msgs
+
+
+def test_all_package_partitions_are_classified():
+    """真实包里的分区不应有『既非逻辑、也非 danger/warn/blocked』的漏网。
+
+    需要设置环境变量 LROM_TEST_PACKAGE 指向一个真实 ROM 包，否则跳过。
+    """
+    import os
+
+    pkg_path = os.environ.get("LROM_TEST_PACKAGE")
+    if not pkg_path or not Path(pkg_path).exists():
+        pytest.skip("未设置 LROM_TEST_PACKAGE")
+    from lrom.core.package import inspect_package
+    from lrom.core.plan import _classify_partition
+
+    info = inspect_package(Path(pkg_path))
+    for part in info.manifest.partitions:
+        ph, risk, _ = _classify_partition(part.name)
+        assert risk is not None

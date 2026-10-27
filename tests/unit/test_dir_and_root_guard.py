@@ -17,6 +17,17 @@ import pytest
 from lrom.tui.menu import Session, _sanitize_dirname
 
 
+def _real_pkg():
+    """取一个真实 ROM 包做集成验证；没有就跳过。
+
+    用环境变量 LROM_TEST_PACKAGE 指定，避免把本机路径写进仓库。
+    """
+    import os
+
+    v = os.environ.get("LROM_TEST_PACKAGE")
+    return Path(v) if v and Path(v).exists() else None
+
+
 # ---------------------------------------------------------------------------
 # 目录命名
 # ---------------------------------------------------------------------------
@@ -41,9 +52,9 @@ def test_image_dir_uses_version_not_filename(tmp_path):
     s = Session()
     s.work_dir = tmp_path
     # 真实存在包，version_name 才有值；这里用真实包
-    pkg = Path("/home/rov/桌面/rom.zip")
-    if not pkg.exists():
-        pytest.skip("测试包不存在")
+    pkg = _real_pkg()
+    if pkg is None:
+        pytest.skip("未设置 LROM_TEST_PACKAGE")
     s.package = pkg
     d = s.image_dir
     assert d.name.startswith("OPD2404_")
@@ -54,9 +65,9 @@ def test_existing_old_dir_still_recognized(tmp_path):
     """旧的按文件名解包目录仍然能被识别（向后兼容）。"""
     s = Session()
     s.work_dir = tmp_path
-    pkg = Path("/home/rov/桌面/rom.zip")
-    if not pkg.exists():
-        pytest.skip("测试包不存在")
+    pkg = _real_pkg()
+    if pkg is None:
+        pytest.skip("未设置 LROM_TEST_PACKAGE")
     s.package = pkg
     old = tmp_path / "rom"
     old.mkdir()
@@ -106,7 +117,7 @@ class _Snap:
         self.locked = locked
 
 
-def _sess(pkg="/home/rov/桌面/rom.zip"):
+def _sess(pkg=str(_real_pkg() or "")):
     s = Session()
     s.package = Path(pkg) if pkg else None
     return s
@@ -135,9 +146,9 @@ def test_verify_rejects_model_mismatch():
     """一加 15 连上、选的是平板包 → 必须拒绝。"""
     from lrom.tui.menu import _verify_device_for_root
 
-    pkg = Path("/home/rov/桌面/rom.zip")
-    if not pkg.exists():
-        pytest.skip("测试包不存在")
+    pkg = _real_pkg()
+    if pkg is None:
+        pytest.skip("未设置 LROM_TEST_PACKAGE")
     oneplus15 = _Snap(model="PLK110", codename="PLK110", build="PLK110_17.0.0.105(CN01)")
     assert _verify_device_for_root(oneplus15, _sess(str(pkg)), action="root") is False
 
@@ -146,9 +157,9 @@ def test_verify_accepts_matching_device(capsys):
     """平板 + 平板包 → 放行。"""
     from lrom.tui.menu import _verify_device_for_root
 
-    pkg = Path("/home/rov/桌面/rom.zip")
-    if not pkg.exists():
-        pytest.skip("测试包不存在")
+    pkg = _real_pkg()
+    if pkg is None:
+        pytest.skip("未设置 LROM_TEST_PACKAGE")
     pad = _Snap()
     assert _verify_device_for_root(pad, _sess(str(pkg)), action="root") is True
     out = capsys.readouterr().out

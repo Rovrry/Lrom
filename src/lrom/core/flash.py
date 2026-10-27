@@ -132,6 +132,23 @@ def preflight(
             )
         )
 
+    # 2.5) OCDT（engineering_cdt）专项提醒：这是机独有校准分区，
+    # 用非本机的会导致进不了 Fastboot，损坏后售后也无法修复。
+    ocdt = [
+        op.partition
+        for op in plan.active_ops
+        if op.partition in ("engineering_cdt", "ocdt")
+    ]
+    if ocdt:
+        issues.append(
+            PreflightIssue(
+                "warn",
+                f"将刷写 {'/'.join(ocdt)}（OCDT 机独有校准分区）："
+                "必须确认镜像来自本机同型号同版本的全量包，"
+                "用别机的会导致进不了 Fastboot，损坏后只能拆字库",
+            )
+        )
+
     # 3) 磁盘剩余空间
     try:
         free = shutil.disk_usage(image_dir).free

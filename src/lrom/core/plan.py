@@ -104,6 +104,13 @@ WARN_PARTITIONS = frozenset(
         "vbmeta",
         "vbmeta_system",
         "vbmeta_vendor",
+        # OCDT（engineering_cdt）：决定能否进 Fastboot 的机独有校准分区。
+        # 用非本机的会被拒绝进 Fastboot，损坏后售后也无法修复（只能拆字库）。
+        # 备份清单里有它，但刷写时必须明确警告，不能当普通分区静默刷。
+        "engineering_cdt",
+        "ocdt",
+        # 欧加 AVB 备份分区
+        "oplusstanvbk",
     }
 )
 
