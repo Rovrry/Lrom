@@ -188,3 +188,87 @@ def test_unknown_when_both_missing():
 def test_real_large_arb_values():
     cmp = compare_arb(ArbInfo(3, 0, 5), ArbInfo(3, 0, 7))
     assert cmp.verdict is ArbVerdict.BRICK
+
+
+# ---------------------------------------------------------------------------
+# fastboot 读取 ARB 的健壮性（v0.4.5）
+#
+# 背景：read_device_arb_fastboot 曾经会「挂死 6 分钟」——
+# 它对 3 个分区名各尝试一次 fetch（每次 timeout=120s），
+# 而 fastboot 在没有设备时会无限等待 < waiting for any device >，
+# 不支持 fetch 的 bootloader 也照样要等满超时。
+# ---------------------------------------------------------------------------
+
+
+class _FakeFb:
+    def __init__(self, *, devices, fetch_supported, fetch_ok=False):
+        self._devices = devices
+        self._fetch_supported = fetch_supported
+        self._fetch_ok = fetch_ok
+        self.calls = []
+
+    def devices(self):
+        return ["serial1"] if self._devices else []
+
+    def run(self, *args, timeout=None):
+        self.calls.append(args)
+        from lrom.device.runner import RunResult
+
+        if args[0] == "getvar":
+            if self._fetch_supported:
+                text = "max-fetch-size: 0x10000000\nFinished."
+            else:
+                text = (
+                    "getvar:max-fetch-size  FAILED "
+                    "(remote: 'GetVar Variable Not found')"
+                )
+            return RunResult(
+                argv=list(args), exit_code=0, stdout=text, stderr=""
+            )
+        return RunResult(argv=list(args), exit_code=0, stdout="", stderr="")
+
+
+def test_no_device_returns_immediately_without_fetch():
+    """无设备时必须立刻返回，绝不能去调 fetch（那会无限等待）。"""
+    from lrom.core.arb import read_device_arb_fastboot
+
+    fb = _FakeFb(devices=False, fetch_supported=False)
+    notes = []
+    out = read_device_arb_fastboot(fb, on_notice=notes.append)
+
+    assert out is None
+    assert fb.calls == [], "无设备时不应该发起任何 fastboot 命令"
+    assert any("未检测到" in n for n in notes)
+
+
+def test_unsupported_fetch_short_circuits():
+    """bootloader 不支持 fetch 时，探测一次就返回，不逐个分区去试。"""
+    from lrom.core.arb import read_device_arb_fastboot
+
+    fb = _FakeFb(devices=True, fetch_supported=False)
+    notes = []
+    out = read_device_arb_fastboot(fb, on_notice=notes.append)
+
+    assert out is None
+    # 只应有一个 getvar，且没有任何 fetch 调用
+    assert len(fb.calls) == 1
+    assert fb.calls[0][0] == "getvar"
+    assert not any(c[0] == "fetch" for c in fb.calls)
+    assert any("不支持" in n for n in notes)
+
+
+def test_supports_fetch_detection():
+    from lrom.core.arb import _supports_fetch
+    from lrom.device.runner import RunResult
+
+    ok = RunResult(
+        argv=[], exit_code=0, stdout="max-fetch-size: 0x10000000", stderr=""
+    )
+    bad = RunResult(
+        argv=[],
+        exit_code=0,
+        stdout="",
+        stderr="getvar:max-fetch-size FAILED (remote: 'GetVar Variable Not found')",
+    )
+    assert _supports_fetch(ok) is True
+    assert _supports_fetch(bad) is False

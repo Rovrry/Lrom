@@ -311,7 +311,7 @@ python3 -m pytest tests/unit -q
 pip install -e ".[dev]"
 ```
 
-测试覆盖（212 个）：
+测试覆盖（238 个）：
 
 | 文件 | 覆盖内容 |
 |---|---|
@@ -320,7 +320,8 @@ pip install -e ".[dev]"
 | `test_plan.py` | 分区分级、刷写顺序、危险分区 |
 | `test_unpack.py` | 解压、extent 布局、SHA-256、拒绝增量 |
 | `test_flash.py` | 刷写流程、失败中止、关键分区跳过 |
-| `test_arb.py` | ARB 解析与降级拦截 |
+| `test_arb.py` | ARB 解析与降级拦截、fetch 健壮性 |
+| `test_backup.py` | 备份清单（OCDT）、分区槽位映射 |
 | `test_monitor.py` | 设备监测 |
 | `test_menu_integrity.py` | 菜单模块 AST 名字解析（防误删函数） |
 | `test_bootimg.py` | boot image 解析、ramdisk 检查、AVB footer |

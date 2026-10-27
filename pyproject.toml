@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lrom"
-version = "0.4.4"
+version = "0.4.5"
 description = "Linux 原生 Android 线刷工具，支持欧加（OPPO/OnePlus/realme）设备"
 readme = "README.md"
 requires-python = ">=3.10"

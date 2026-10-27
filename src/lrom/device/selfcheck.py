@@ -157,6 +157,24 @@ def _blocked_usb() -> list[str]:
     return []
 
 
+#: 低于这个版本刷 super 等大分区会明显变慢、易超时。
+#: Google Platform-Tools 35.0.0（2024-02）起优化了下载吞吐。
+MIN_FASTBOOT_VERSION = 35.0
+
+
+def _parse_platform_tools_version(text: str) -> float | None:
+    """从 ``fastboot version 34.0.5-debian`` 这类输出里取出主版本号。"""
+    import re
+
+    m = re.search(r"version\s+(\d+)\.(\d+)", text)
+    if not m:
+        return None
+    try:
+        return float(f"{m.group(1)}.{m.group(2)}")
+    except ValueError:
+        return None
+
+
 def run_selfcheck() -> list[CheckItem]:
     items: list[CheckItem] = []
 
@@ -184,8 +202,27 @@ def run_selfcheck() -> list[CheckItem]:
             path = find_tool(name)
             tools[name] = path
             code, out = _run([path, "version" if name == "adb" else "--version"])
-            ver = out.strip().splitlines()[0] if out.strip() else "版本未知"
-            items.append(CheckItem(Level.OK, f"{name} 已安装", f"{path}\n    {ver}"))
+            raw = out.strip().splitlines()[0] if out.strip() else "版本未知"
+            # adb 输出版本格式是 "Android Debug Bridge version 1.0.41"，
+            # 不代表 platform-tools 版本，用 adb --version 才准
+            ver_num = None
+            if name == "fastboot":
+                ver_num = _parse_platform_tools_version(raw)
+            hint = f"{path}\n    {raw}"
+            if ver_num is not None and ver_num < MIN_FASTBOOT_VERSION:
+                items.append(
+                    CheckItem(
+                        Level.WARN,
+                        f"{name} 版本偏旧",
+                        hint,
+                        "建议升级到 Google 官方 Platform-Tools "
+                        f"{MIN_FASTBOOT_VERSION:.0f}.0.0 或更新："
+                        "\n    旧版刷写 super 等大分区会很慢，容易超时失败。"
+                        "\n    https://developer.android.com/tools/releases/platform-tools",
+                    )
+                )
+            else:
+                items.append(CheckItem(Level.OK, f"{name} 已安装", hint))
         except Exception as exc:
             tools[name] = None
             items.append(

@@ -194,6 +194,15 @@ def _recovery_hint(part: str, phase: Phase) -> str:
     return f"fastboot flash {part} {part}.img   # 需先 fastboot reboot fastboot"
 
 
+#: 超过这个大小的分区改用分块传输（-S）。
+#: 中小分区没必要分块，反而多一层开销。
+SPARSE_THRESHOLD = 512 * 1024 * 1024  # 512 MB
+
+#: 分块大小。100M 是社区验证过的稳妥值：
+#: 既能让单次传输窗口足够小，又不会因块太小而显著变慢。
+SPARSE_CHUNK = "100M"
+
+
 class FlashExecutor:
     """刷写执行器。"""
 
@@ -268,8 +277,14 @@ class FlashExecutor:
             )
             ticker.start()
         try:
+            # 大分区（如 super 动辄几 GB）一次性传输容易撑爆 USB 缓冲，
+            # 表现为「卡在 waiting for device」后超时失败。
+            # fastboot 的 -S <size> 会自动把镜像切成分块传输，规避这个限制。
+            flash_args: list[str] = []
+            if size >= SPARSE_THRESHOLD:
+                flash_args += ["-S", SPARSE_CHUNK]
             res: RunResult = self.fb.run(
-                "flash", op.partition, str(img), timeout=3600
+                *flash_args, "flash", op.partition, str(img), timeout=3600
             )
         finally:
             stop_ticker.set()

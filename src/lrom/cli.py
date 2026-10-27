@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import shutil
 import sys
 from pathlib import Path
 
@@ -415,14 +416,19 @@ def cmd_backup(args: argparse.Namespace) -> int:
         ).isoformat(),
     )
 
+    critical = [p for p in parts if p not in bk.OPTIONAL_PARTITIONS]
+
     for part in parts:
-        print(f"  {part:<16}", end="", flush=True)
+        print(f"  {part:<18}", end="", flush=True)
         result = bk.backup_partition_adb(
             adb, part, out_dir / f"{part}.img", slot=dev.slot
         )
         session.results.append(result)
         if result.ok:
             print(paint(f"✓ {result.size_mb:>8,.1f} MB", C.GREEN))
+        elif part in bk.OPTIONAL_PARTITIONS:
+            # 部分机型没有这个分区（例如某些版本没有 fsg），不算失败
+            print(paint(f"· 跳过（本机可能无此分区）", C.DIM))
         else:
             print(paint(f"✗ {result.error}", C.RED))
 
@@ -430,12 +436,41 @@ def cmd_backup(args: argparse.Namespace) -> int:
     print()
     print(f"  清单: {manifest}")
 
-    if session.ok:
-        print(paint(f"\n✓ 备份完成（{len(session.results)} 个分区）", C.GREEN + C.BOLD))
+    ok_parts = [r for r in session.results if r.ok]
+    failed_critical = [r for r in session.results if not r.ok and r.partition in critical]
+
+    print()
+    if not failed_critical:
+        print(
+            paint(
+                f"✓ 备份完成（{len(ok_parts)} 个分区）",
+                C.GREEN + C.BOLD,
+            )
+        )
+        # OCDT 单独强调 —— 它是唯一「丢了就救不回来」的分区
+        if any(r.partition == "engineering_cdt" and r.ok for r in session.results):
+            print()
+            print(
+                paint(
+                    "  ★ engineering_cdt（OCDT）已备份。",
+                    C.GREEN,
+                )
+            )
+            print("    这份文件是本机独有的 —— 恢复时**必须**用它，")
+            print("    用别的设备的 OCDT 会导致进不了 Fastboot。")
+            print("    建议另存到 U 盘/云盘，不要只留在这台电脑上。")
         return 0
 
-    failed = [r.partition for r in session.results if not r.ok]
-    print(paint(f"\n✗ 部分备份失败: {', '.join(failed)}", C.RED + C.BOLD))
+    print(
+        paint(
+            f"✗ 关键分区备份失败: {', '.join(r.partition for r in failed_critical)}",
+            C.RED + C.BOLD,
+        )
+    )
+    print()
+    print("  这些分区缺失时刷机**没有安全退路**，建议先解决再继续：")
+    for r in failed_critical:
+        print(f"    · {r.partition}: {r.error}")
     return 1
 
 
@@ -523,6 +558,41 @@ def cmd_unpack(args: argparse.Namespace) -> int:
     out_dir = Path(args.output) if args.output else (
         Path("unpacked") / Path(args.package).stem
     )
+
+    # ---- 磁盘空间检查 ----
+    # 全量包解出来的镜像往往比 zip 本身大得多（payload 是压缩的），
+    # 不检查的话会解到一半磁盘满，留下半截文件更难处理。
+    try:
+        targets = set(args.partitions or [p.name for p in info.manifest.partitions])
+        bs = info.manifest.block_size
+        need = sum(
+            p.size_bytes(bs)
+            for p in info.manifest.partitions
+            if p.name in targets
+        )
+        out_dir.mkdir(parents=True, exist_ok=True)
+        free = shutil.disk_usage(out_dir).free
+        # 留 5% 余量，避免刚好卡在边界
+        need_with_margin = int(need * 1.05)
+        if free < need_with_margin:
+            print(
+                paint(
+                    "✗ 磁盘空间不足，解包会中途失败",
+                    C.RED + C.BOLD,
+                )
+            )
+            print()
+            print(f"  需要  : {need_with_margin / 2**30:.1f} GB")
+            print(f"  可用  : {free / 2**30:.1f} GB")
+            print(f"  目录  : {out_dir}")
+            print()
+            print("  建议：")
+            print("    · 换一个空间更大的目录：-o /path/to/bigger/disk")
+            print("    · 或只解需要的分区：--partitions boot init_boot")
+            print()
+            return 1
+    except OSError:
+        pass  # 拿不到磁盘信息就跳过检查，不阻塞
 
     print()
     print(paint(f"解包: {Path(args.package).name}", C.BOLD))
@@ -1011,19 +1081,25 @@ def cmd_arb(args: argparse.Namespace) -> int:
 
     # ---- 设备的 ARB ----
     dev_arb = None
+    dev_note = None
     dev = detect(adb_server_port=args.adb_port)
     if dev:
         if dev.mode is DeviceMode.ADB:
             adb = AdbRunner(server_port=args.adb_port)
             dev_arb = read_device_arb_adb(adb, dev.serial)
+            if dev_arb is None:
+                dev_note = (
+                    "设备在 ADB 模式但无法读取 ARB（需要 root）。\n"
+                    "       把设备切到 fastboot 模式可尝试用 fetch 读取，\n"
+                    "       但部分一加机型（含平板 Pro）的 bootloader 不支持 fetch。"
+                )
         elif dev.mode in (DeviceMode.FASTBOOT, DeviceMode.FASTBOOTD):
-            dev_arb = read_device_arb_fastboot(FastbootRunner())
+            dev_arb = read_device_arb_fastboot(
+                FastbootRunner(),
+                on_notice=lambda m: print(f"  {paint('·', C.DIM)} {m}"),
+            )
     else:
-        # 没有设备也可能在 fastboot
-        try:
-            dev_arb = read_device_arb_fastboot(FastbootRunner())
-        except Exception:
-            pass
+        dev_note = "未连接设备。只能参考包侧 ARB 判断。"
 
     print()
     print(paint("╭─ ARB 熔断检测 " + "─" * 42, C.BOLD))
@@ -1050,8 +1126,30 @@ def cmd_arb(args: argparse.Namespace) -> int:
     print()
 
     if cmp.verdict is ArbVerdict.UNKNOWN:
-        print("  提示：设备侧 ARB 需要在 fastboot 模式下回读，或设备已 root。")
-        print("        无法确认时，请勿降级到更低的系统版本。")
+        if dev_note:
+            print(f"  原因：{dev_note}")
+            print()
+        print("  ⚠ 无法确认设备侧 ARB 时，请勿降级到更低的系统版本。")
+        print()
+        if pkg_arb is not None:
+            if pkg_arb.arb_index >= 1:
+                print(
+                    paint(
+                        f"  注意：本包 xbl_config 的 ARB = {pkg_arb.arb_index}。",
+                        C.YELLOW + C.BOLD,
+                    )
+                )
+                print("        ARB ≥ 1 表示该版本已引入防回滚熔断 ——")
+                print("        一旦刷入，将无法再降级到 ARB 更低的版本（不可逆）。")
+                print("        如果还没刷，请先在社区确认目标版本是否已熔断。")
+            else:
+                print(
+                    paint(
+                        f"  本包 xbl_config 的 ARB = {pkg_arb.arb_index}，"
+                        "降级不会触发熔断。",
+                        C.GREEN,
+                    )
+                )
         print()
 
     return 0 if cmp.verdict is not ArbVerdict.BRICK else 1

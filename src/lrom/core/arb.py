@@ -212,19 +212,54 @@ def read_device_arb_adb(adb, serial: str | None = None) -> ArbInfo | None:
         tmp_path.unlink(missing_ok=True)
 
 
-def read_device_arb_fastboot(fb) -> ArbInfo | None:
+def read_device_arb_fastboot(
+    fb, *, timeout: float = 60.0, on_notice=None
+) -> ArbInfo | None:
     """通过 fastboot fetch 回读设备 xbl_config 并解析（不需要 root）。
 
-    需要设备处于 fastboot 模式，且 fastboot 版本支持 fetch（34+）。
+    需要设备处于 fastboot 模式，且 bootloader 支持 fetch 命令。
+
+    ⚠️ 这里是曾经会「挂死 6 分钟」的地方，务必遵守三条：
+      1. **先确认设备在线**。fastboot 在没有设备时会无限等待
+         ``< waiting for any device >``，只能靠外部 timeout 杀掉。
+      2. **先探测 max-fetch-size**。不支持 fetch 的 bootloader
+         （一加平板 Pro 实测就是）会在 getvar 阶段立刻返回失败，
+         比逐个分区去 fetch 快得多，也不会让用户干等。
+      3. **单次超时要短**。真正支持 fetch 的设备几秒就读完，
+         给 120 秒毫无意义，只会把「不支持」放大成「卡死」。
     """
     import tempfile
 
+    # ---- 1) 设备在线吗 ----
+    try:
+        if not fb.devices():
+            if on_notice:
+                on_notice("未检测到 fastboot 设备，跳过设备侧 ARB 读取。")
+            return None
+    except Exception:  # noqa: BLE001
+        return None
+
+    # ---- 2) 支持 fetch 吗 ----
+    try:
+        probe = fb.run("getvar", "max-fetch-size", timeout=15)
+        if not _supports_fetch(probe):
+            if on_notice:
+                on_notice(
+                    "本机 bootloader 不支持 fastboot fetch，"
+                    "无法读取设备侧 ARB（只能参考包侧数值）。"
+                )
+            return None
+    except Exception:  # noqa: BLE001
+        return None
+
+    # ---- 3) 真正读取 ----
+    per_try = max(5.0, timeout / 3)
     for part in ("xbl_config", "xbl_config_a", "xbl_config_b"):
         with tempfile.TemporaryDirectory() as td:
             out = Path(td) / "xbl_config.img"
             try:
-                res = fb.run("fetch", part, str(out), timeout=120)
-            except Exception:
+                fb.run("fetch", part, str(out), timeout=per_try)
+            except Exception:  # noqa: BLE001
                 continue
             if not out.exists() or out.stat().st_size == 0:
                 continue
@@ -235,6 +270,15 @@ def read_device_arb_fastboot(fb) -> ArbInfo | None:
             except ArbError:
                 continue
     return None
+
+
+def _supports_fetch(result) -> bool:
+    """判断 getvar max-fetch-size 的结果是否说明设备支持 fetch。"""
+    text = (getattr(result, "combined", "") or "").lower()
+    if "failed" in text or "not found" in text or "not support" in text:
+        return False
+    # 正常应返回 max-fetch-size: 0x...
+    return "max-fetch-size" in text and "0x" in text
 
 
 # --------------------------------------------------------------------------

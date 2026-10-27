@@ -26,8 +26,35 @@ from ..device.runner import AdbRunner, FastbootRunner
 
 
 #: 建议备份的分区（按重要性排序）。
-#: boot/init_boot/vbmeta 是救砖的最小集合；super 是逻辑分区容器。
+#:
+#: 这份清单来自一加社区/售后/XDA 的实战复盘，不是凭感觉排的。
+#: 每一条都对应一种「不可逆」的损失：
+#:
+#:   P0  OCDT / engineering_cdt
+#:         **最容易被忽略、后果最严重的一个。**
+#:         OCDT 记录设备出厂校准数据，损坏后 bootloader 进不去。
+#:         而「用别机的 OCDT」也会导致进不了 Fastboot —— 必须备份**本机**的。
+#:         真正救不回来的砖，绝大多数是这个分区没了。
+#:
+#:   P0  boot / init_boot / vbmeta* / dtbo
+#:         刷坏后唯一能救回开机的镜像。
+#:
+#:   P1  persist
+#:         指纹、传感器、屏幕校准。丢了不可再生。
+#:
+#:   P2  modem / fsg
+#:         信号相关，跨区刷写后的「信号修复」靠它。
+#:
+#: 注意：一加**没有独立的 efs 分区**，网上说的「备份 efs」在这类机型上
+#: 实际抓手就是 persist + modem。
 DEFAULT_BACKUP_PARTITIONS = (
+    # P0 —— OCDT 必须排第一，因为它最容易被忘掉。
+    # 注意这是**两个不同的分区**，都要备份：
+    #   ocdt              128 KB，裸名无槽位
+    #   engineering_cdt   1 MB × 2 槽
+    "ocdt",
+    "engineering_cdt",
+    # P0 —— 救回开机的最小集合
     "boot",
     "init_boot",
     "vbmeta",
@@ -35,10 +62,37 @@ DEFAULT_BACKUP_PARTITIONS = (
     "vbmeta_vendor",
     "dtbo",
     "recovery",
+    # P1 —— 不可再生的小分区
+    "persist",
+    # P2 —— 信号相关
+    "modem",
+    "fsg",
+)
+
+#: 分区表里就是裸名、**没有** _a/_b 后缀的分区。
+#: 若误加后缀会去找一个不存在的设备节点，备份直接失败。
+_NO_SLOT_PARTITIONS = frozenset(
+    {
+        "super",
+        "userdata",
+        "metadata",
+        "misc",
+        "persist",
+        "ocdt",  # ← 实测：一加平板 Pro 上 ocdt 无槽位
+        "cdt",
+        "frp",
+        "devinfo",
+        "param",
+    }
 )
 
 #: 需要 root 才能读（否则会被 SELinux 拒绝）
-ROOT_REQUIRED = frozenset({"super", "modem"})
+ROOT_REQUIRED = frozenset(
+    {"super", "modem", "persist", "fsg", "engineering_cdt", "ocdt"}
+)
+
+#: 这些分区缺失时不算失败（部分机型没有对应分区）
+OPTIONAL_PARTITIONS = frozenset({"fsg"})
 
 
 @dataclass
@@ -103,10 +157,17 @@ def has_root(adb: AdbRunner) -> bool:
 
 
 def _partition_name(part: str, slot: str | None) -> str:
-    """把裸分区名映射为实际设备节点名（补 _a/_b）。"""
+    """把裸分区名映射为实际设备节点名（补 _a/_b）。
+
+    注意不是所有分区都有槽位。以下这些在分区表里就是裸名：
+      super / userdata / metadata / misc / persist
+      ocdt / cdt          ← OCDT 相关，**没有槽位**，补了反而找不到
+    """
     if part.endswith(("_a", "_b")):
         return part
-    if slot and part not in ("super", "userdata", "metadata", "misc", "persist"):
+    if part in _NO_SLOT_PARTITIONS:
+        return part
+    if slot:
         return f"{part}_{slot}"
     return part
 
