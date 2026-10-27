@@ -714,10 +714,24 @@ def _flow_unpack(sess: Session, mon) -> None:
     assert out is not None
     print()
     print(f"  输出目录: {out}")
+
+    # 清除该目录下上一次的解包产物，避免新旧混合：
+    # 若上一个包与本包的镜像集合不同（少一个 dtbo.img 之类），
+    # 旧镜像会留下来，目录内容就与当前包不符。
+    # 只清本目录、只清 *.img 与索引文件，绝不碰其它目录。
     if out.exists():
-        n = len(list(out.glob("*.img")))
-        if n and not confirm(f"已有 {n} 个镜像，覆盖吗？"):
-            return
+        stale = list(out.glob("*.img")) + list(out.glob("*.img.part"))
+        idx = out / "unpacked.json"
+        if idx.exists():
+            stale.append(idx)
+        if stale:
+            print(f"  发现 {len(stale)} 个旧产物，清理后重新解包")
+            for f in stale:
+                try:
+                    f.unlink()
+                except OSError as e:
+                    print(f"    ! 无法删除 {f.name}: {e}")
+    out.mkdir(parents=True, exist_ok=True)
 
     print()
     counter = {"n": 0}
