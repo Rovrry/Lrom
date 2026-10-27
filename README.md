@@ -321,8 +321,13 @@ fastboot reboot      # 当前在 fastboot
 
 ## 开发
 
-开发记录（踩坑记录、实现方法、方案调研、实验报告）由作者本地留存，
-不在本仓库公开。仓库只包含源码与版本变更日志。
+实验记录与方案调研：
+
+- **[docs/ARB-实验报告.md](docs/ARB-实验报告.md)** —— ARB 熔断对照实验，
+  出厂包 `ARB=0` 与已熔断设备 `ARB=1` 的完整对照数据
+- **[docs/ROOT-IMPLEMENTATION.md](docs/ROOT-IMPLEMENTATION.md)** —— root 自动化实现方法
+- **[docs/research/](docs/research/)** —— root 方案调研与来源
+  （KernelSU / Magisk / 欧加 bootimg 结构 / 可行性分析）
 
 版本历史见 **[CHANGELOG.md](CHANGELOG.md)**。
 
