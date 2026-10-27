@@ -2,6 +2,42 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.4.8] - 2026-10-27
+
+### 仓库整理：只保留源码与开发记录
+
+按使用习惯统一仓库内容与上传方式。
+
+#### 清理
+
+| 项目 | 处理 |
+|---|---|
+| 临时备份 `/tmp/lrom-git-backup-*` | 删除（含旧敏感信息） |
+| `arb-lab/`（ARB 实验数据，含设备分区镜像） | 删除 |
+| `unpacked/`（解包产物） | 删除 |
+| `__pycache__/` `.pytest_cache/` `*.egg-info/` | 删除 |
+| GitHub 上 11 个 tag | **全部删除** |
+| GitHub 上 11 个 Release | **全部删除** |
+
+清理后仓库只剩：**源码 + 开发记录**，单一 `main` 分支。
+
+#### 上传规范（写入 DEVNOTES 第 4 节）
+
+- **只上传源码和开发记录**，不传 ROM/镜像/备份/运行产物/个人信息
+- **统一用命令行 git**，不走网页上传，便于审查变更
+- 提交前自查敏感信息：
+  `git diff --cached | grep -nE "序列号|serial|/home/|@gmail|token|password|secret"`
+- token 只在推送命令里出现，不写进 `git config`
+- 作者邮箱用 `<用户名>@users.noreply.github.com`，避免暴露真实邮箱
+- 暂不使用 tag/Release，需要发版时再打
+
+#### 本地保留
+
+本地可保留 `backups/` `unpacked/` `root-work/` `.venv/` 等，
+均在 `.gitignore` 内不会被误提交。个人临时笔记命名 `*.local.md` 同样被忽略。
+
+测试 274 个通过。
+
 ## [0.4.7] - 2026-10-27
 
 ### 安全：清理 git 历史中的个人信息
