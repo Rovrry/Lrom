@@ -48,6 +48,7 @@ __all__ = [
     "fetch_latest_release",
     "pick_asset",
     "download_asset",
+    "install_manager_apk",
 ]
 
 #: 唯一允许联网的域名。不在此列表的一律拒绝。
@@ -386,3 +387,46 @@ def resolve_manager_source(key: str) -> ManagerSource:
             + ", ".join(sorted(MANAGER_SOURCES))
         )
     return src
+
+
+def install_manager_apk(
+    apk_path: Path,
+    *,
+    adb_server_port: int | None = None,
+    on_line=None,
+) -> tuple[str, str]:
+    """把已下载的管理器 APK 安装（推送）到设备。
+
+    返回 ``(status, detail)``，status 取值：
+
+    - ``"installed"``：已成功安装（detail 里是 adb 输出）
+    - ``"no_device"``：没有可用设备（detail 里是可给用户的提示）
+    - ``"failed"``：有设备但安装失败（detail 里是错误）
+
+    为什么不直接 subprocess：统一走 AdbRunner，与其他命令同源，
+    便于在测试里替换。
+    """
+    from ..device.discover import DeviceMode, detect
+    from ..device.runner import AdbRunner
+
+    apk_path = Path(apk_path)
+    if not apk_path.is_file():
+        return ("failed", f"APK 不存在: {apk_path}")
+
+    dev = detect(adb_server_port=adb_server_port)
+    if dev is None or dev.mode is not DeviceMode.ADB:
+        return (
+            "no_device",
+            "未连接处于 ADB（开机）模式的设备，无法自动安装。\n"
+            "  请用数据线连接设备、开启 USB 调试后重试，\n"
+            f"  或手动安装：adb install -r {apk_path}",
+        )
+
+    adb = AdbRunner(server_port=adb_server_port)
+    adb.serial = dev.serial
+    # -r 覆盖安装；-d 允许降级（用户可能换回旧版）
+    res = adb.run("install", "-r", "-d", str(apk_path), timeout=300)
+    if res.exit_code != 0 or "Failure" in (res.stdout + res.stderr):
+        out = (res.stderr or res.stdout or "").strip()
+        return ("failed", out or f"adb install 退出码 {res.exit_code}")
+    return ("installed", (res.stdout or "").strip())

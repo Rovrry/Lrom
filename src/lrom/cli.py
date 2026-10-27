@@ -1635,12 +1635,29 @@ def cmd_fetch_manager(args: argparse.Namespace) -> int:
     print("\r" + " " * 50 + "\r", end="")
     print(paint("  ✓ 下载完成，校验通过", C.GREEN))
     print()
-    print(f"  {path}")
+    # 下载后的本机物理位置要明确标注，避免用户找不到文件
+    abs_path = path.resolve()
+    print(f"  {paint('保存位置', C.BOLD)}: {abs_path}")
+    print(f"  大小: {abs_path.stat().st_size / 1024 / 1024:.1f} MB")
     print()
-    print("  安装到设备：")
-    print(paint(f"    adb install -r {path}", C.CYAN))
+
+    # 有设备就直接装进去；没有就提示插设备
+    status, detail = mf.install_manager_apk(
+        abs_path, adb_server_port=getattr(args, "adb_port", None)
+    )
+    if status == "installed":
+        print(paint("  ✓ 已自动安装到设备", C.GREEN))
+    elif status == "no_device":
+        print(paint("  ! 未检测到设备，APK 已保存在本机", C.YELLOW))
+        print(f"    {detail}")
+    else:
+        print(paint("  ⛔ 自动安装失败", C.RED))
+        print(f"    {detail}")
+        print(paint(f"    可手动安装：adb install -r {abs_path}", C.CYAN))
     print()
-    print("  或用 APP 方式跑 root（会自动推开安装提示）：")
-    print(paint(f"    ./lrom root --method app", C.CYAN))
-    print()
+
+    if status != "installed":
+        print("  安装后可继续用 APP 方式跑 root：")
+        print(paint("    ./lrom root --method app", C.CYAN))
+        print()
     return 0

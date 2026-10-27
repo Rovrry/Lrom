@@ -193,7 +193,7 @@ def test_menu_lists_root_section():
     text = menu.build_menu(FakeSess(), True)
     assert "Root" in text
     assert "获取 Root" in text
-    assert "下载 Root 管理器" in text
+    assert "只下载管理器" in text
     assert "回滚 Root" in text
 
 

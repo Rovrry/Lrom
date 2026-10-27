@@ -279,8 +279,8 @@ def build_menu(sess: "Session", env_ok: bool) -> str:
         f"   {_color('6', C.CYAN)}) ARB 熔断检测      防降级硬砖",
         "",
         f"  {_color('─ Root ────────────────────────────────────────', d)}",
-        f"   {_color('7', C.CYAN)}) 获取 Root          patch init_boot 并刷入",
-        f"   {_color('8', C.CYAN)}) 下载 Root 管理器   从 GitHub 下载 APK（唯一联网）",
+        f"   {_color('7', C.CYAN)}) 获取 Root          下载管理器 + patch init_boot + 刷入",
+        f"   {_color('8', C.CYAN)}) 只下载管理器      单独下载 APK，不走 root 流程",
         f"   {_color('9', C.CYAN)}) 回滚 Root          刷回原厂 init_boot",
         "",
         f"  {_color('─ 工具 ────────────────────────────────────────', d)}",
@@ -1104,7 +1104,11 @@ def _verify_device_for_root(snap, sess: "Session", *, action: str) -> bool:
 
 
 def _menu_root(sess: "Session", mon) -> None:
-    """菜单 7：获取 Root。"""
+    """菜单 7：获取 Root。
+
+    流程：定位原厂镜像 → 机型核对 → （可选）下载并安装管理器 →
+    执行 root 计划。下载管理器已内置进本流程，不必再单独走菜单 8。
+    """
     import argparse
 
     from ..cli import cmd_root
@@ -1129,9 +1133,13 @@ def _menu_root(sess: "Session", mon) -> None:
         return
     print()
 
+    # ---- 根管理器 APK（内置下载）----
+    _ensure_root_manager(mon)
+    print()
+
     print(f"  {_color('提示', C.BOLD)}：")
     print("    · 刷写前会把原厂镜像备份到 root-work/，可随时回滚")
-    print("    · 需要 KernelSU / Magisk 管理器 APK（菜单 8 可下载）")
+    print("    · APP 方式：按提示在管理器里选择刚推送的镜像进行修补")
     print("    · Lrom 不会自动重启设备")
     print()
 
@@ -1152,6 +1160,117 @@ def _menu_root(sess: "Session", mon) -> None:
         print()
         print(f"  {_color('流程未完成。', C.YELLOW)}")
     pause()
+
+
+def _ensure_root_manager(mon) -> Path | None:
+    """确保 root 管理器 APK 已下载并安装。
+
+    - 若 root-work/ 里已有 APK，询问是否沿用/重新下载
+    - 选择管理器与渠道 → 下载 → 自动推送到设备（有设备时）
+    - 明确标注 APK 的本机绝对路径
+
+    返回已就绪的 APK 路径；用户跳过或失败时返回 None。
+    """
+    from ..core.manager_fetch import MANAGER_SOURCES
+
+    workdir = Path("root-work")
+    existing = sorted(workdir.glob("*.apk")) if workdir.is_dir() else []
+
+    print(f"  {_color('Root 管理器（APK）', C.BOLD)}")
+    if existing:
+        print("  已有下载好的管理器：")
+        for i, p in enumerate(existing, 1):
+            try:
+                mb = p.stat().st_size / 1024 / 1024
+            except OSError:
+                mb = 0
+            print(
+                f"    {_color(str(i), C.CYAN)}) {p.name}  ({mb:.1f} MB)"
+                f"  {_color(str(p.resolve()), C.DIM)}"
+            )
+        print(f"    {_color('d', C.CYAN)}) 重新下载一个")
+        print(f"    {_color('s', C.CYAN)}) 跳过（稍后自己安装）")
+        print()
+        pick = ask("请选择", "1").strip().lower()
+        if pick == "s":
+            print(f"  {_color('已跳过管理器环节', C.DIM)}")
+            return None
+        if pick != "d":
+            try:
+                chosen = existing[int(pick) - 1]
+            except (ValueError, IndexError):
+                print(f"  {_color('无效选择，跳过', C.YELLOW)}")
+                return None
+            _install_apk_to_device(chosen, mon)
+            return chosen
+
+    # ---- 选择管理器 ----
+    print("  这是 Lrom 唯一会联网的功能。只访问 GitHub，")
+    print("  只下载文件、不执行任何远程代码，下载后强制校验 sha256。")
+    print()
+    keys = list(MANAGER_SOURCES)
+    for i, key in enumerate(keys, 1):
+        src = MANAGER_SOURCES[key]
+        print(f"    {_color(str(i), C.CYAN)}) {src.label:<20s} {src.repo}")
+    print(f"    {_color('s', C.CYAN)}) 跳过下载")
+    print()
+    pick = ask("请选择", "1").strip().lower()
+    if pick == "s":
+        print(f"  {_color('已跳过管理器环节', C.DIM)}")
+        return None
+    try:
+        key = keys[int(pick) - 1]
+    except (ValueError, IndexError):
+        print(f"  {_color('无效选择，跳过', C.YELLOW)}")
+        return None
+
+    print()
+    print(f"  {_color('渠道', C.BOLD)}：")
+    print(f"    {_color('1', C.CYAN)}) 正式版（stable）")
+    print(f"    {_color('2', C.CYAN)}) 测试版（beta，可能有 bug）")
+    print()
+    channel = "beta" if ask("请选择", "1").strip() == "2" else "stable"
+
+    print()
+    import argparse
+
+    from ..cli import cmd_fetch_manager
+
+    rc = cmd_fetch_manager(
+        argparse.Namespace(
+            source=key,
+            channel=channel,
+            dest=str(workdir),
+            asset=None,
+            yes=False,
+            adb_port=None,
+        )
+    )
+    if rc != 0:
+        return None
+    # cmd_fetch_manager 内部已完成自动安装；这里回找最新 APK 便于返回
+    apks = sorted(
+        workdir.glob("*.apk"), key=lambda p: p.stat().st_mtime, reverse=True
+    )
+    return apks[0] if apks else None
+
+
+def _install_apk_to_device(apk: Path, mon) -> None:
+    """把已存在的 APK 装到设备（用于「沿用已有 APK」分支）。"""
+    from ..core.manager_fetch import install_manager_apk
+
+    print()
+    print(f"  正在安装 {_color(apk.name, C.BOLD)} 到设备…")
+    status, detail = install_manager_apk(apk)
+    if status == "installed":
+        print(f"  {_color('✓ 已安装', C.GREEN)}")
+    elif status == "no_device":
+        print(f"  {_color('! 未检测到设备', C.YELLOW)}")
+        print(f"    {detail}")
+    else:
+        print(f"  {_color('⛔ 安装失败', C.RED)}")
+        print(f"    {detail}")
+    print(f"  {_color('本机位置', C.DIM)}: {apk.resolve()}")
 
 
 def _menu_fetch_manager(sess: "Session", mon) -> None:
