@@ -493,6 +493,29 @@ def cmd_plan(args: argparse.Namespace) -> int:
     # 设备信息
     dev = detect(adb_server_port=args.adb_port)
 
+    # 预演阶段就检查 ARB 熔断机型 —— 免得到真刷时才发现刷不了
+    from .core.arb_db import ArbRisk as _ArbRisk
+    from .core.arb_db import check_arb_risk as _check_arb
+
+    _arb = _check_arb(
+        package_version=info.version_name,
+        device_version=getattr(dev, "build_id", None) if dev else None,
+        model_code=info.product_name,
+        codename=(getattr(dev, "codename", None) if dev else None) or info.pre_device,
+    )
+    if _arb.risk is _ArbRisk.BLOCK:
+        print(paint("✗ ARB 熔断保护：预演不通过", C.RED + C.BOLD))
+        print()
+        print(f"  {_arb.message}")
+        print()
+        print("  刷入这个包会直接把设备变砖，且无自救通道。")
+        print()
+        return 1
+    if _arb.risk is _ArbRisk.WARN:
+        print(paint("  !! ARB 熔断风险（预演）", C.YELLOW))
+        print(f"  {_arb.message}")
+        print()
+
     # 预演阶段就检查 Bootloader 锁 —— 免得到真刷时才发现刷不了
     if dev is not None:
         if dev.locked is None:
@@ -687,6 +710,43 @@ def cmd_flash(args: argparse.Namespace) -> int:
     if not dev:
         print(paint("✗ 未检测到设备", C.RED))
         return 1
+
+    # ---- 2.3) ARB 熔断机型检查 ----
+    # 这是最后一道兜底：用户可能没跑 `lrom arb` 就直接 flash。
+    # 硬编码的熔断表能在这种情况下拦住「降级到熔断前版本」这个
+    # 最常见的黑砖场景。
+    from .core.arb_db import ArbRisk, check_arb_risk, format_arb_check
+
+    arb_result = check_arb_risk(
+        package_version=info.version_name,
+        device_version=dev.build_id,
+        model_code=info.product_name,
+        codename=dev.codename or info.pre_device,
+    )
+    if arb_result.risk is ArbRisk.BLOCK:
+        print(paint("✗ ARB 熔断保护：拒绝刷写", C.RED + C.BOLD))
+        print()
+        print(format_arb_check(arb_result))
+        print()
+        print("  为什么必须停手：")
+        print("    · 这些机型的 ARB 已从 0 升到 1，降级刷入会直接黑砖")
+        print("    · 同时免授权 9008 已失效，没有自救通道")
+        print("    · 只能拆字库或换主板")
+        print()
+        print("  想确认具体数值，可以先跑（只读，不写设备）：")
+        print(paint("    ./lrom arb --images <镜像目录>", C.CYAN))
+        print()
+        return 1
+    if arb_result.risk is ArbRisk.WARN:
+        print(paint("  !! ARB 熔断风险警告", C.YELLOW + C.BOLD))
+        print(f"  {format_arb_check(arb_result)}")
+        print()
+        if not args.yes:
+            from .tui.menu import confirm
+
+            if not confirm("仍然继续刷写？"):
+                print("  已取消。")
+                return 1
 
     # ---- 2.5) Bootloader 锁检查（必须在任何写操作之前）----
     # 为什么必须查：锁定的设备刷写会失败在中途，或者只写进去一半，

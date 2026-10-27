@@ -121,7 +121,7 @@ lrom flash ~/Downloads/rom.zip --images unpacked/rom
 | `lrom unpack <包>` | 解包出分区镜像 |
 | `lrom plan <包>` | 生成刷写计划 |
 | `lrom arb` | ARB 熔断检测 |
-| `lrom flash <包>` | 执行刷写 |
+| `lrom flash <包>` | 执行刷写（含 ARB 熔断保护）|
 | `lrom root` | 自动化 root（patch init_boot） |
 | `lrom fetch-manager` | 下载 root 管理器 APK（**唯一联网命令**） |
 
@@ -167,6 +167,26 @@ adb install -r root-work/KernelSU_*.apk
 ```bash
 fastboot flash init_boot root-work/init_boot-stock-<时间>.img
 ```
+
+### ARB 熔断保护
+
+部分一加/OPPO 机型从特定版本起会提高 `xbl_config` 的 ARB 值，
+**降级刷入会永久黑砖，且免授权 9008 已失效无法自救**。
+
+Lrom 内置了实测的熔断机型表，`lrom plan` 和 `lrom flash` 会在写设备前检查：
+
+```
+✗ ARB 熔断保护：拒绝刷写
+
+  ⛔ 这个包是 16.0.3.501 之前的版本，而该机型从那时起已熔断 ARB。
+    刷入等于降级到熔断前，会导致永久黑砖，且免授权 9008 已失效，无法自救。
+```
+
+已收录：一加平板 Pro/Pad 2、一加 13/13T/13s/12、Ace 5/3 Pro/6、
+Pad 2 Pro/3 等。同时维护「安全表」（一加 15、Ace 5 Pro 等实测未熔断机型
+永不误伤）。
+
+精确判断请用 `lrom arb`，或在线查 https://oparb.pages.dev/
 
 ### 联网说明
 
@@ -322,6 +342,7 @@ pip install -e ".[dev]"
 | `test_flash.py` | 刷写流程、失败中止、关键分区跳过 |
 | `test_arb.py` | ARB 解析与降级拦截、fetch 健壮性 |
 | `test_backup.py` | 备份清单（OCDT）、分区槽位映射 |
+| `test_arb_db.py` | ARB 熔断机型数据库、降级阻断 |
 | `test_monitor.py` | 设备监测 |
 | `test_menu_integrity.py` | 菜单模块 AST 名字解析（防误删函数） |
 | `test_bootimg.py` | boot image 解析、ramdisk 检查、AVB footer |
