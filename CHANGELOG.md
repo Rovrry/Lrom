@@ -4,6 +4,33 @@
 
 ## [0.5.0] - 2026-10-27
 
+### 修复：ADB 模式下 BL 锁状态被模块 hook 误判
+
+**问题**（实测反馈）：一加 15 已解锁，开机状态下 Lrom 显示「已锁定」，
+进 fastboot 后却显示正常。
+
+根因：原先只读 getprop 的 `ro.boot.flash.locked`，而该属性**可以被
+模块（KernelSU / Magisk 等）hook 篡改**。实测该机：
+
+| 来源 | 值 | 可信度 |
+|---|---|---|
+| `getprop ro.boot.flash.locked` | `1`（锁定） | 被 hook，假 |
+| `getprop ro.boot.verifiedbootstate` | `green` | 被 hook，假 |
+| `/proc/cmdline` 的 `oplusboot.verifiedbootstate` | `orange` | **真实：已解锁** |
+
+改为多来源交叉验证，cmdline 优先：
+
+1. `/proc/cmdline` 的 `oplusboot.verifiedbootstate` / `androidboot.verifiedbootstate`
+   —— 内核启动参数，运行期只读，模块改不了
+2. getprop 的 `ro.boot.verifiedbootstate`
+3. getprop 的 `ro.boot.flash.locked`（最易被 hook，兜底）
+
+`orange` = 已解锁；`green` = 已锁定；`yellow` / `red` 为异常校验，
+按已锁定处理（偏保守）。fastboot 模式本就走 `getvar unlocked`，
+不受影响。
+
+测试 -> 307。
+
 ### 修复：机型一致性检查提到 ARB 之前
 
 **问题**（实测反馈）：接一加 15（PLK110）、刷平板包（OPD2404）时，

@@ -138,6 +138,66 @@ def _normalize_slot(slot: str | None) -> str | None:
     return slot
 
 
+def _read_adb_locked(adb: AdbRunner) -> str | None:
+    """在 ADB（开机）模式下判断 Bootloader 解锁状态。
+
+    返回 "0" = 已解锁 / "1" = 已锁定 / None = 无法判断
+    （沿用 discover.Device.locked 的既有语义）。
+
+    为什么要看多个来源：`ro.boot.flash.locked` 等 getprop 属性
+    **可以被模块（KernelSU / Magisk 之类）hook 篡改**，实测遇到过
+    已解锁的一加 15 上 `ro.boot.flash.locked=1`、`verifiedbootstate=green`，
+    但内核启动参数里明明是 `verifiedbootstate=orange`。
+
+    可靠程度（由高到低）：
+
+    1. `/proc/cmdline` 里的 `verifiedbootstate` / `oplusboot.verifiedbootstate`
+       —— 内核启动参数，运行期只读，模块改不了。
+    2. `/proc/cmdline` 里的 `androidboot.verifiedbootstate`
+    3. getprop 的 `ro.boot.verifiedbootstate`
+    4. getprop 的 `ro.boot.flash.locked`
+
+    `verifiedbootstate`：orange = 已解锁 / green = 已锁定 /
+    yellow,red = 异常（这里按已锁定处理，宁可保守）。
+    """
+    # --- 1/2. 内核 cmdline：最可信 ---
+    try:
+        res = adb.shell("cat /proc/cmdline")
+        if res.exit_code == 0:
+            tokens = res.stdout.split()
+            # 同一份 cmdline 里可能同时出现 oplusboot.* 与 androidboot.*
+            for key in ("oplusboot.verifiedbootstate=", "androidboot.verifiedbootstate="):
+                for tok in tokens:
+                    if tok.startswith(key):
+                        state = tok[len(key):].strip().lower()
+                        if state == "orange":
+                            return "0"
+                        if state in ("green", "yellow", "red"):
+                            return "1"
+    except Exception:  # noqa: BLE001
+        pass
+
+    # --- 3. getprop 的 verifiedbootstate ---
+    try:
+        state = (adb.getprop("ro.boot.verifiedbootstate") or "").strip().lower()
+        if state == "orange":
+            return "0"
+        if state in ("green", "yellow", "red"):
+            return "1"
+    except Exception:  # noqa: BLE001
+        pass
+
+    # --- 4. getprop 的 flash.locked（最容易被 hook，兜底）---
+    try:
+        locked = (adb.getprop("ro.boot.flash.locked") or "").strip()
+        if locked in ("0", "1"):
+            return locked
+    except Exception:  # noqa: BLE001
+        pass
+
+    return None
+
+
 def _read_adb_device(adb: AdbRunner, serial: str) -> Device:
     adb.serial = serial
     dev = Device(serial=serial, mode=DeviceMode.ADB)
@@ -147,8 +207,7 @@ def _read_adb_device(adb: AdbRunner, serial: str) -> Device:
     dev.android_version = adb.getprop("ro.build.version.release") or None
     dev.slot = _normalize_slot(adb.getprop("ro.boot.slot_suffix").lstrip("_")) or None
 
-    locked = adb.getprop("ro.boot.flash.locked")
-    dev.locked = locked if locked else None
+    dev.locked = _read_adb_locked(adb)
 
     # 欧加系：产品名常在 ro.product.name / ro.build.product
     dev.product_name = (
