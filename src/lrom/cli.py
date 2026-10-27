@@ -244,6 +244,18 @@ def build_parser() -> argparse.ArgumentParser:
     pf.add_argument("--adb-port", type=int, default=None, help="adb server 端口")
     pf.set_defaults(func=cmd_flash)
 
+    pl = sub.add_parser(
+        "relock", help="BL 回锁（高风险：自动平刷两次完整包后回锁）"
+    )
+    pl.add_argument("package", help="完整系统包（.zip）")
+    pl.add_argument(
+        "-i", "--images", default=None, help="已解包的镜像目录（省略则用包内镜像）"
+    )
+    pl.add_argument("--dry-run", action="store_true", help="只打印计划，不写设备")
+    pl.add_argument("--yes", action="store_true", help="跳过交互确认（危险）")
+    pl.add_argument("--adb-port", type=int, default=None, help="adb server 端口")
+    pl.set_defaults(func=cmd_relock)
+
     pa = sub.add_parser("arb", help="ARB 熔断检测（判断降级是否会变砖）")
     pa.add_argument(
         "-i", "--images", default="unpacked/rom", help="镜像目录（默认 unpacked/rom）"
@@ -822,12 +834,14 @@ def cmd_flash(args: argparse.Namespace) -> int:
     from .device.runner import FastbootRunner as _FB
 
     fb_early = _FB()
+    # 允许显式指定槽位（relock 平刷两遍时用）；否则用设备当前槽
+    _target_slot = getattr(args, "slot", None) or dev.slot
     plan = build_plan(
         info.manifest,
         package_path=str(info.path),
         device_model=dev.model,
         device_codename=dev.codename,
-        slot=dev.slot,
+        slot=_target_slot,
         device_partitions=device_parts or None,
         allow_dangerous=args.allow_dangerous,
         include=args.partitions,
@@ -1126,6 +1140,200 @@ def _print_after_flash_notice(arb_cmp, *, wipe: bool) -> None:
     print("│")
     print(paint("╰" + "─" * 44, C.YELLOW + C.BOLD))
     print()
+
+
+def cmd_relock(args: argparse.Namespace) -> int:
+    """BL 回锁 —— 最高风险操作。
+
+    安全前提：必须先平刷两次完整系统包（A 槽一遍、B 槽一遍），
+    两次都成功且分区集合一致，才允许回锁。任何校验不通过都拒绝。
+
+    流程：
+      1. 校验设备处于 fastboot 且已解锁
+      2. 第一次平刷 A 槽（完整包）
+      3. 切到 B 槽
+      4. 第二次平刷 B 槽（同一完整包）
+      5. 校验两次刷写
+      6. 切回原槽
+      7. fastboot flashing lock
+    """
+    import argparse as _ap
+
+    from .core.package import Verdict, inspect_package
+    from .core.relock import build_relock_plan, verify_two_pass
+    from .device.discover import DeviceMode, detect
+    from .device.runner import FastbootRunner
+
+    print()
+    print(paint("╭─ BL 回锁 " + "─" * 48, C.RED + C.BOLD))
+    print()
+
+    # ---- 0) 绝对确认：回锁不可逆，输错就砖 ----
+    print(paint("  ⚠ 这是最高风险操作。回锁后如果两个槽的系统不一致，设备会变砖，", C.RED + C.BOLD))
+    print(paint("    且回锁后没有解锁通道可自救。", C.RED + C.BOLD))
+    print()
+    print("  Lrom 会先平刷两次完整系统包（A 槽、B 槽各一遍），")
+    print("  只有两次都成功且分区一致时才允许回锁。")
+    print()
+
+    pkg = args.package
+    info = inspect_package(pkg)
+    if info.verdict is not Verdict.FLASHABLE or info.manifest is None:
+        print(paint(f"  ⛔ 该包不能线刷：{info.verdict.value}", C.RED + C.BOLD))
+        print("     回锁必须使用完整、可线刷的官方系统包。")
+        print()
+        return 1
+
+    pkg_partitions = {p.name for p in info.manifest.partitions}
+    pkg_version = info.version_name
+
+    # ---- 1) 设备状态 ----
+    dev = detect(adb_server_port=getattr(args, "adb_port", None))
+    if dev is None:
+        print(paint("  ⛔ 未检测到设备。", C.RED))
+        print("     回锁需要设备处于 fastboot（bootloader）模式。")
+        print()
+        return 1
+    if dev.mode is not DeviceMode.FASTBOOT:
+        print(paint(f"  ⛔ 设备当前不在 fastboot 模式（{dev.mode.value}）。", C.RED + C.BOLD))
+        print("     请执行：adb reboot bootloader")
+        print()
+        return 1
+    if dev.locked is None:
+        print(paint("  ⛔ 无法确认 Bootloader 状态，已停止。", C.RED + C.BOLD))
+        print()
+        return 1
+    if str(dev.locked) != "0":
+        print(paint("  ⛔ 设备当前已是锁定状态，无需回锁。", C.YELLOW + C.BOLD))
+        print()
+        return 1
+
+    plan = build_relock_plan(
+        device_model=dev.model or "",
+        device_codename=dev.codename or "",
+        current_slot=dev.slot or "",
+    )
+    print(plan.describe())
+
+    if getattr(args, "dry_run", False):
+        print(paint("  这是预演（--dry-run），不会写入任何数据。", C.YELLOW))
+        print()
+        return 0
+
+    if not getattr(args, "yes", False):
+        from .tui.menu import confirm
+
+        print(paint("  ⚠ 即将开始：平刷两次系统包，然后回锁。", C.RED + C.BOLD))
+        print("     期间请勿断电、勿拔线。回锁会清空全部用户数据。")
+        print()
+        if not confirm("确认开始回锁流程？（输入 FLASH 确认）", "FLASH"):
+            print("  已取消。")
+            print()
+            return 1
+
+    fb = FastbootRunner(serial=dev.serial if hasattr(dev, "serial") else None)
+
+    def _flash_slot(slot: str, label: str) -> tuple[bool, list[str]]:
+        """把完整包平刷到指定槽。返回 (是否成功, 失败分区列表)。
+
+        关键：物理分区名是裸名，实际刷到哪个槽由 fastboot 当前激活槽
+        决定。所以必须先 --set-active 切到目标槽，再刷；
+        否则两次平刷会刷到同一个槽，"平刷两次"就失去意义。
+        """
+        print()
+        print(paint(f"  [{label}] 切换到 {slot} 槽…", C.CYAN))
+        res_sw = fb.run(f"--set-active={slot}", timeout=120)
+        if not fb.ok(res_sw):
+            print(paint(f"  ⛔ 切换到 {slot} 槽失败：{res_sw.combined.strip()[:200]}", C.RED))
+            return (False, [f"切换{slot}槽失败"])
+
+        print()
+        print(paint(f"  [{label}] 正在向 {slot} 槽平刷完整系统包…", C.CYAN + C.BOLD))
+        print()
+        ns = _ap.Namespace(
+            package=pkg,
+            images=args.images,
+            dry_run=False,
+            yes=True,
+            partitions=None,
+            allow_dangerous=False,
+            force_arb=False,
+            no_reboot=True,
+            wipe=False,
+            both_slots=False,
+            no_recreate_logical=False,
+            adb_port=getattr(args, "adb_port", None),
+            slot=slot,
+        )
+        rc = cmd_flash(ns)
+        return (rc == 0, [])
+
+    # ---- 2) 第一次平刷（_flash_slot 内部会先 set-active 到 A）----
+    a_ok, a_failed = _flash_slot("a", "1/2")
+    if not a_ok:
+        print(paint("  ⛔ 第一次平刷失败，已中止，不会回锁。", C.RED + C.BOLD))
+        print(paint("     设备当前处于已刷一半的状态，请重新平刷完整包后再试。", C.RED))
+        print()
+        return 1
+
+    # ---- 3) 第二次平刷（_flash_slot 内部会先 set-active 到 B）----
+    b_ok, b_failed = _flash_slot("b", "2/2")
+    if not b_ok:
+        print(paint("  ⛔ 第二次平刷失败，已中止，不会回锁。", C.RED + C.BOLD))
+        print()
+        return 1
+
+    # ---- 5) 校验两次刷写 ----
+    check = verify_two_pass(
+        pass_a_ok=a_ok,
+        pass_b_ok=b_ok,
+        pass_a_partitions=pkg_partitions,
+        pass_b_partitions=pkg_partitions,
+        pass_a_version=pkg_version,
+        pass_b_version=pkg_version,
+        pass_a_failed=a_failed,
+        pass_b_failed=b_failed,
+    )
+    print()
+    if not check.can_relock:
+        print(paint("  ⛔ 两槽一致性校验未通过，拒绝回锁：", C.RED + C.BOLD))
+        for r in check.reasons:
+            print(f"     · {r}")
+        print()
+        print("  设备现在两槽都刷了同一包，但校验异常。")
+        print("  为安全起见不回锁；重新平刷完整两遍后再试。")
+        print()
+        return 1
+
+    print(paint("  ✓ 两次平刷均成功，分区集合一致，版本一致", C.GREEN + C.BOLD))
+    print()
+
+    # ---- 6) 切回原起始槽 ----
+    start_slot = dev.slot or "a"
+    if start_slot in ("a", "b"):
+        print(paint(f"  切回起始槽 {start_slot}…", C.CYAN))
+        res = fb.run(f"--set-active={start_slot}", timeout=120)
+        if not fb.ok(res):
+            print(paint("  ⛔ 切回起始槽失败，已中止，不会回锁。", C.RED + C.BOLD))
+            print()
+            return 1
+
+    # ---- 7) 回锁 ----
+    print()
+    print(paint("  正在执行回锁：fastboot flashing lock", C.CYAN + C.BOLD))
+    print(paint("  回锁会清空数据并重启，请勿中断…", C.YELLOW))
+    res = fb.run("flashing", "lock", timeout=300)
+    if not fb.ok(res):
+        print(paint(f"  ⛔ 回锁命令失败：{res.combined.strip()[:200]}", C.RED + C.BOLD))
+        print("     设备可能仍处于解锁状态，请检查后重试。")
+        print()
+        return 1
+
+    print()
+    print(paint("  ✓ 回锁成功。设备会格式化数据并重启。", C.GREEN + C.BOLD))
+    print("     首次开机较慢（重新加密数据），属正常现象。")
+    print()
+    return 0
 
 
 def cmd_arb(args: argparse.Namespace) -> int:

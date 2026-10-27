@@ -289,6 +289,9 @@ def build_menu(sess: "Session", env_ok: bool) -> str:
         f"   {_color('12', C.CYAN)}) 环境自检          重新检查 adb / udev / 权限",
         f"   {_color('13', C.CYAN)}) 关于",
         "",
+        f"  {_color('─ 高级（高风险）───────────────────────────────', d)}",
+        f"   {_color('14', C.CYAN)}) BL 回锁           平刷两次后回锁（会清空数据，慎用）",
+        "",
         f"   {_color('0', C.CYAN)}) 退出",
     ]
     if not env_ok:
@@ -596,6 +599,7 @@ def run_menu() -> int:
         "11": _menu_reboot,
         "12": _menu_selfcheck,
         "13": _menu_about,
+        "14": _menu_relock,
     }
 
     def _draw() -> None:
@@ -987,6 +991,80 @@ def _menu_selfcheck(sess: Session, mon) -> None:
     from ..cli import cmd_selfcheck
 
     cmd_selfcheck(argparse.Namespace())
+    pause()
+
+
+def _menu_relock(sess: "Session", mon) -> None:
+    """菜单 14：BL 回锁（高风险）。
+
+    必须先平刷两次完整系统包（A/B 槽各一遍），校验通过才回锁。
+    """
+    import argparse
+
+    from ..cli import cmd_relock
+
+    print()
+    print(f"  {_color('BL 回锁', C.RED + C.BOLD)}")
+    print()
+    print(f"  {_color('⚠ 高危操作', C.RED + C.BOLD)}：回锁要求两个槽里都是完整、")
+    print("    一致的原厂系统。否则回锁后设备会变砖，且没有解锁通道自救。")
+    print()
+    print("    Lrom 会先平刷两次完整系统包（A 槽、B 槽各一遍），")
+    print("    两次都成功且分区一致时才允许回锁。回锁会清空全部数据。")
+    print()
+    print(f"  {_color('按 q 可随时退出', C.DIM)}")
+    print()
+
+    # 需要用户指定完整包
+    default = str(sess.package) if sess.package and Path(sess.package).exists() else ""
+    if default:
+        print(f"  当前 ROM 包: {default}")
+    p = ask_path("完整系统包路径（.zip）", default)
+    if p and p.name.lower() in ("q", "quit", "exit"):
+        print(f"  {_color('已取消', C.DIM)}")
+        pause()
+        return
+    if not p:
+        if default:
+            p = Path(default)
+        else:
+            print(f"  {_color('未指定系统包，已取消', C.YELLOW)}")
+            pause()
+            return
+    if not p.exists():
+        print(f"  {_color('文件不存在:', C.RED)} {p}")
+        pause()
+        return
+
+    # 镜像目录：优先用已解包的（若存在），否则让 cmd_flash 用包内镜像
+    img_dir = None
+    try:
+        _s = Session()
+        _s.package = p
+        _s.work_dir = sess.work_dir
+        if _s.unpacked:
+            img_dir = str(_s.image_dir)
+    except Exception:  # noqa: BLE001
+        img_dir = None
+    if img_dir:
+        print(f"  使用已解包镜像: {img_dir}")
+    else:
+        print(f"  {_color('注意：未找到已解包镜像，将直接从包内读取（较慢）。', C.DIM)}")
+        print(f"  {_color('建议先执行菜单 1 解包。', C.DIM)}")
+    print()
+
+    rc = cmd_relock(
+        argparse.Namespace(
+            package=p,
+            images=img_dir,
+            dry_run=False,
+            yes=False,
+            adb_port=None,
+        )
+    )
+    if rc != 0:
+        print()
+        print(f"  {_color('回锁未完成。', C.YELLOW)}")
     pause()
 
 
