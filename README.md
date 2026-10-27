@@ -339,7 +339,7 @@ python3 -m pytest tests/unit -q
 pip install -e ".[dev]"
 ```
 
-测试覆盖（370 个）：
+测试覆盖（376 个）：
 
 | 文件 | 覆盖内容 |
 |---|---|

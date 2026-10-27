@@ -78,6 +78,28 @@ def pause(msg: str = "按回车继续…") -> None:
         raise SystemExit(0)
 
 
+def _safe_pause(msg: str = "按回车继续…") -> None:
+    """同 pause，但 Ctrl+C 只当作"继续"，不退出整个程序。"""
+    try:
+        input(f"\n  {_color(msg, C.DIM)}")
+    except (EOFError, KeyboardInterrupt):
+        print()
+
+
+def _safe_refresh(mon) -> None:
+    """刷新设备状态，吞掉一切异常（含 KeyboardInterrupt），绝不在这里崩。
+
+    设备刚刷完处于 fastboot/fastbootd，或用户频繁 Ctrl+C 时，
+    这里的探测可能阻塞/被中断。刷新失败不影响主流程，直接忽略。
+    """
+    if mon is None:
+        return
+    try:
+        mon.refresh_now()
+    except BaseException:  # noqa: BLE001 — 含 KeyboardInterrupt
+        pass
+
+
 def input_with_redraw(
     prompt: str,
     *,
@@ -625,24 +647,26 @@ def run_menu() -> int:
             handler = handlers.get(choice)
             if not handler:
                 print(f"  {_color('无效选择', C.YELLOW)}")
-                pause()
+                _safe_pause()
                 continue
 
             try:
                 handler(sess, mon)
-            except SystemExit:
-                raise
             except KeyboardInterrupt:
-                print(f"\n  {_color('已取消', C.YELLOW)}")
-                pause()
-            except Exception as exc:
+                # 用户在子流程里按了 Ctrl+C：友好提示后回到菜单，不甩 traceback
+                print(f"\n  {_color('已中断当前操作，返回菜单', C.YELLOW)}")
+                _safe_pause()
+            except Exception as exc:  # noqa: BLE001
                 print(f"\n  {_color('出错了:', C.RED)} {exc}")
-                pause()
+                _safe_pause()
             finally:
-                try:
-                    mon.refresh_now()
-                except Exception:
-                    pass
+                # 刷新设备状态：吞掉一切异常（含 KeyboardInterrupt），
+                # 并给探测加超时保护，避免设备处于 fastboot/fastbootd 时卡住。
+                _safe_refresh(mon)
+    except KeyboardInterrupt:
+        # 主循环层 Ctrl+C（例如在刷新设备时）：优雅退出
+        print(f"\n  {_color('已退出', C.YELLOW)}")
+        return 0
     finally:
         mon.stop()
 

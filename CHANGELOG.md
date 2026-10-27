@@ -2,6 +2,33 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.7.5] - 2026-10-28
+
+### 修复：Ctrl+C 中断时甩出 Python traceback
+
+**现象**（真机实测）：刷写完成后按 Ctrl+C，终端打印一大段 traceback
+（`KeyboardInterrupt` 停在 `mon.refresh_now` → `getvar is-userspace`）。
+
+**根因**：`run_menu` 主循环的 `finally` 里调 `mon.refresh_now()` 刷新设备
+状态。此时设备刚刷完在 fastboot，探测会阻塞；用户按 Ctrl+C 打断它，
+但：
+
+1. `finally` 里只 `except Exception` —— **拦不住 KeyboardInterrupt**
+   （它不是 Exception 子类），traceback 直接冒出
+2. 主循环外层没有兜底的 KeyboardInterrupt 处理
+
+**修正**：
+
+- 新增 `_safe_refresh(mon)`：刷新设备状态时 `except BaseException`
+  吞掉一切（含 KeyboardInterrupt），刷新失败不影响主流程
+- 新增 `_safe_pause()`：`pause` 遇 Ctrl+C 只当"继续"，不 `SystemExit`
+- `run_menu` 主循环捕获 KeyboardInterrupt，打印「已中断当前操作，返回菜单」，
+  顶层再兜底一次优雅退出
+
+现在 Ctrl+C 不会再甩 traceback。刷写本身成功（34 分区 OK）不受影响。
+
+测试 370 -> 376。
+
 ## [0.7.4] - 2026-10-28
 
 ### 改进：线刷全量包默认刷到「另一个槽」
