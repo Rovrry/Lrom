@@ -259,7 +259,7 @@ def _clear_screen() -> None:
 
 def _print_device_facts(snap) -> None:
     """在主页头部补印关键设备信息：Android 版本、BL 锁、9008 提示。"""
-    from ..core.edl_db import EdlRisk, check_edl_risk
+    from ..core.edl_db import EdlRisk
 
     parts: list[str] = []
 
@@ -276,89 +276,115 @@ def _print_device_facts(snap) -> None:
     if parts:
         print("              " + _color("·", C.DIM) + " " + "  ".join(parts))
 
-    # 9008 免授权：只在设备已处于/越过熔断版本时给一行提示，
-    # 详情放到解包与刷写流程里（避免每次进菜单都长段落输出）。
-    # 注意 model 与 codename 是两种标识（OPD2404 vs OP5D77L1），都要试。
-    edl = EdlRisk.UNKNOWN
-    for cand in (snap.model, snap.codename):
-        if not cand:
-            continue
-        edl = check_edl_risk(
-            package_version=snap.build_id or None,
-            device_version=snap.build_id or None,
-            model_code=cand,
-            codename=snap.codename or None,
-        ).risk
-        if edl is not EdlRisk.UNKNOWN:
-            break
-    if edl is EdlRisk.LIKELY_FUSED:
+    # 9008 免授权：仅按**设备自身**标识判定，未收录机型不显示任何提示。
+    edl_res, _ = _check_edl_for(snap, snap.build_id or None)
+    if edl_res is not None and edl_res.risk is EdlRisk.LIKELY_FUSED:
         print(
             "              "
-            + _color("! 9008 免授权可能已熔断（不可逆，降级无效）", C.YELLOW)
+            + _color("! 9008 免授权已熔断（不可逆，降级无效）", C.YELLOW)
         )
 
 
-def _warn_edl_risk(info, mon) -> None:
-    """在解包/刷写前提示 9008 免授权影响。
+def _device_model_keys(snap) -> list[str]:
+    """取**设备侧**可用于机型匹配的标识。
 
-    只做提醒，不阻断 —— 熔断意味着失去未来的自救通道，
-    而不是立刻变砖，决定权留给用户。
+    只用设备自己的型号/代号/产品名，绝不能用包里的 product_name ——
+    否则换一台设备（如把一加 15 接上来）仍会按包的机型给提醒，
+    属于张冠李戴。
+
+    型号（OPD2404）、代号（OP5D77L1）、产品名三者都可能是库里记录的形式，
+    全部收进来逐个尝试。
     """
+    if not snap or not getattr(snap, "present", False):
+        return []
+    keys: list[str] = []
+    for attr in ("model", "codename", "product_name"):
+        val = getattr(snap, attr, None)
+        if val and val not in keys:
+            keys.append(val)
+    return keys
+
+
+def _check_edl_for(snap, package_version):
+    """按设备自身标识做 9008 判定，返回 (结果, 命中的标识) 或 (None, None)。"""
     from ..core.edl_db import EdlRisk, check_edl_risk
 
+    device_ver = getattr(snap, "build_id", None) if snap else None
+    for cand in _device_model_keys(snap):
+        res = check_edl_risk(
+            package_version=package_version,
+            device_version=device_ver,
+            model_code=cand,
+            codename=getattr(snap, "codename", None),
+        )
+        if res.risk is not EdlRisk.UNKNOWN:
+            return res, cand
+    return None, None
+
+
+def _warn_edl_risk(info, mon) -> bool:
+    """在解包/刷写前提示 9008 免授权影响。
+
+    返回 True 表示**应当中止流程**（当前配置为硬阻断）。
+
+    判定机型只认设备侧标识（见 `_device_model_keys`）。未收录的机型
+    （如一加 15 PLK110）不做任何提示。
+    """
+    from ..core.edl_db import EdlRisk
+
     snap = mon.snapshot if mon else None
-    device_ver = snap.build_id if (snap and snap.present) else None
+    if not snap or not getattr(snap, "present", False):
+        return False
 
-    # 设备侧能拿到的是代号（OP5D77L1），而库里记的是型号（OPD2404）。
-    # 包里的 product_name 是型号，优先用它；两者都传上去做匹配。
-    model_candidates = []
-    if getattr(info, "product_name", None):
-        model_candidates.append(info.product_name)
-    if getattr(info, "pre_device", None):
-        model_candidates.append(info.pre_device)
-    if snap and snap.present:
-        model_candidates.extend(x for x in (snap.model, snap.codename) if x)
-    model_code = model_candidates[0] if model_candidates else None
+    res, matched = _check_edl_for(snap, info.version_name)
+    if res is None or res.risk is EdlRisk.SAFE:
+        return False
 
-    res = check_edl_risk(
-        package_version=info.version_name,
-        device_version=device_ver,
-        model_code=model_code,
-        codename=snap.codename if (snap and snap.present) else None,
+    model_show = (
+        getattr(snap, "model", None)
+        or getattr(snap, "codename", None)
+        or matched
     )
-    # 若第一种标识没匹配上，再试其余候选
-    if res.risk is EdlRisk.UNKNOWN:
-        for cand in model_candidates[1:]:
-            alt = check_edl_risk(
-                package_version=info.version_name,
-                device_version=device_ver,
-                model_code=cand,
-                codename=snap.codename if (snap and snap.present) else None,
-            )
-            if alt.risk is not EdlRisk.UNKNOWN:
-                res = alt
-                break
-    if res.risk is EdlRisk.UNKNOWN or res.risk is EdlRisk.SAFE:
-        return
 
     print()
     if res.risk is EdlRisk.WILL_FUSE:
-        print(_color("  ┌─ ⚠ 9008 免授权将被永久熔断 " + "─" * 26, C.RED + C.BOLD))
-        print(f"  │ {res.message}")
+        print(_color("  ┌─ ⛔ 已拦截：9008 免授权将被永久熔断 " + "─" * 20, C.RED + C.BOLD))
+        print(f"  │ 机型    : {model_show}（{matched}）")
         print(f"  │ 包版本  : {res.package_version}")
         print(f"  │ 设备版本: {res.device_version}")
+        print(_color("  │", C.RED))
+        print(_color(f"  │ {res.message}", C.RED))
         print(_color("  │", C.RED))
         print(_color("  │ 熔断后：失去 EDL 自主救砖通道，", C.RED))
         print(_color("  │ 若 OCDT 损坏，售后也无法修复。", C.RED))
         print(_color("  │ 降级【不能】恢复 —— 该状态由设备侧决定。", C.RED + C.BOLD))
         print(_color("  └" + "─" * 46, C.RED + C.BOLD))
-    elif res.risk is EdlRisk.LIKELY_FUSED:
-        print(_color("  ! 9008 免授权：设备已越过熔断版本", C.YELLOW + C.BOLD))
+        print()
+        print(_color("  已中止刷写，未写入任何数据。", C.RED + C.BOLD))
+        print(_color("  判定依据：系统版本号推断，设备侧实际状态无法读取", C.DIM))
+        return True
+
+    if res.risk is EdlRisk.LIKELY_FUSED:
+        # 设备已越过阈值：熔断已成事实，刷同版本或升级不会让情况更糟 → 放行
+        print(_color("  ! 9008 免授权状态提醒", C.YELLOW + C.BOLD))
+        print(f"    机型    : {model_show}（{matched}）")
+        print(f"    包版本  : {res.package_version}")
+        print(f"    设备版本: {res.device_version}")
         print(f"    {res.message}")
-    elif res.risk is EdlRisk.DOWNGRADE_NO_RECOVER:
+        print(_color("    判定依据：系统版本号推断，设备侧实际状态无法读取", C.DIM))
+        return False
+
+    if res.risk is EdlRisk.DOWNGRADE_NO_RECOVER:
+        # 降级已无 9008 可失，但要让用户知道救不回来 → 提醒后放行
         print(_color("  ! 降级操作提醒", C.YELLOW + C.BOLD))
+        print(f"    机型    : {model_show}（{matched}）")
+        print(f"    包版本  : {res.package_version}")
+        print(f"    设备版本: {res.device_version}")
         print(f"    {res.message}")
-    print(_color("    判定依据：系统版本号推断，设备侧实际状态无法读取", C.DIM))
+        print(_color("    判定依据：系统版本号推断，设备侧实际状态无法读取", C.DIM))
+        return False
+
+    return False
 
 
 def print_header(sess: Session, mon=None) -> None:
@@ -642,8 +668,10 @@ def _flow_unpack(sess: Session, mon) -> None:
         print(line)
     print(f"    线刷判定  : {info.verdict.value}")
 
-    # ---- 9008 免授权提醒 ----
-    _warn_edl_risk(info, mon)
+    # ---- 9008 免授权检查（命中即中止）----
+    if _warn_edl_risk(info, mon):
+        pause()
+        return
 
     if info.verdict is not Verdict.FLASHABLE:
         print()
@@ -759,15 +787,18 @@ def _flow_flash(sess: Session, mon, *, dry_run: bool, pick: bool = False) -> Non
             return
         ns.partitions = raw.split()
 
-    # 刷写前的 9008 提醒 —— 这是最后一次无害的提醒点
+    # 刷写前的 9008 检查 —— 命中即中止，不进入刷写
     try:
         from ..core.package import inspect_package as _inspect
 
         _info = _inspect(sess.package) if sess.package else None
         if _info is not None:
-            _warn_edl_risk(_info, mon)
-    except Exception:
-        pass
+            if _warn_edl_risk(_info, mon):
+                pause()
+                return
+    except Exception as exc:  # noqa: BLE001
+        # 检查本身出错时不能静默放过，但也不能因此阻断正常刷写
+        print(_color(f"  ! 9008 检查未能完成：{exc}", C.YELLOW))
 
     print()
     print(f"  {_color('刷写选项：', C.BOLD)}")

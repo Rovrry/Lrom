@@ -120,8 +120,8 @@ def test_codename_matching_works():
     assert r.risk is EdlRisk.UNKNOWN
 
 
-def test_never_blocks():
-    """9008 熔断不硬阻断 —— 决定权留给用户。"""
+def test_core_layer_does_not_block_itself():
+    """核心判定层只给风险等级，阻断决策交给调用方（menu）。"""
     for pkg, dev in [
         ("16.0.5.1201", "14.1.0.226"),
         ("14.1.0.226", "16.0.5.1201"),
@@ -235,3 +235,128 @@ def test_menu_passes_model_not_only_codename():
 
     joined = "".join(captured)
     assert "降级" in joined
+
+
+# ---------------------------------------------------------------------------
+# 机型识别必须用「设备侧」标识，不能拿包里的型号张冠李戴
+# ---------------------------------------------------------------------------
+
+
+class _Snap:
+    def __init__(self, model, codename, build):
+        self.present = True
+        self.model = model
+        self.codename = codename
+        self.product_name = model
+        self.build_id = build
+
+
+class _Mon:
+    def __init__(self, snap):
+        self.snapshot = snap
+
+
+class _Info:
+    def __init__(self, version):
+        self.version_name = version
+        self.product_name = "OPD2404"
+        self.pre_device = "OP5D77L1"
+
+
+def _warn(info, snap, capsys):
+    import lrom.tui.menu as M
+
+    ret = M._warn_edl_risk(info, _Mon(snap))
+    out = capsys.readouterr().out
+    return ret, out
+
+
+def test_unlisted_model_gets_no_warning_at_all(capsys):
+    """一加 15（PLK110）不在 9008 库里 → 即使包里是平板的包也不能弹提示。
+
+    这是真实反馈的 bug：换一加 15 上来仍弹「降级不能恢复 9008」。
+    根因是拿包里的 product_name 去匹配，而没用设备自身型号。
+    """
+    ret, out = _warn(_Info("OPD2404_16.0.5.1201(CN01)"), _Snap("PLK110", "PLK110", "PLK110_16.0.0.100(CN01)"), capsys)
+    assert ret is False
+    assert "9008" not in out
+    assert "降级" not in out
+
+
+def test_known_model_upgrade_is_blocked(capsys):
+    """已收录机型从阈值前升上来 → 硬阻断。"""
+    ret, out = _warn(_Info("OPD2404_16.0.5.1201(CN01)"), _Snap("OPD2404", "OP5D77L1", "OPD2404_14.1.0.226(CN01)"), capsys)
+    assert ret is True
+    assert "已拦截" in out
+    assert "OPD2404" in out
+
+
+def test_past_threshold_same_version_is_allowed(capsys):
+    """设备已越过阈值且同版本重刷 → 放行（熔断已成事实，刷它不会更糟）。"""
+    ret, out = _warn(_Info("OPD2404_16.0.5.1201(CN01)"), _Snap("OPD2404", "OP5D77L1", "OPD2404_16.0.5.1201(CN01)"), capsys)
+    assert ret is False
+    assert "已拦截" not in out
+    assert "9008" in out
+
+
+def test_past_threshold_upgrade_is_allowed(capsys):
+    """设备已越过阈值后继续升级 → 放行，否则会被锁死在当前版本。"""
+    ret, out = _warn(_Info("OPD2404_16.0.10.600(CN01)"), _Snap("OPD2404", "OP5D77L1", "OPD2404_16.0.5.1201(CN01)"), capsys)
+    assert ret is False
+    assert "已拦截" not in out
+
+
+def test_downgrade_shows_model_and_does_not_block(capsys):
+    """降级只提醒不阻断，但必须说明是哪个机型。"""
+    ret, out = _warn(_Info("OPD2404_14.1.0.226(CN01)"), _Snap("OPD2404", "OP5D77L1", "OPD2404_16.0.5.1201(CN01)"), capsys)
+    assert ret is False
+    assert "降级" in out
+    assert "机型" in out
+    assert "OPD2404" in out
+
+
+def test_no_device_means_no_check(capsys):
+    """没连设备时不做判定，避免误报。"""
+    class _NoDev:
+        present = False
+
+    import lrom.tui.menu as M
+
+    ret = M._warn_edl_risk(_Info("OPD2404_16.0.5.1201(CN01)"), _Mon(_NoDev()))
+    assert ret is False
+    assert capsys.readouterr().out == ""
+
+
+def test_device_model_keys_excludes_package_fields():
+    """匹配键必须只来自设备侧。"""
+    import lrom.tui.menu as M
+
+    keys = M._device_model_keys(_Snap("PLK110", "PLK110", "X"))
+    assert "OPD2404" not in keys
+    assert "PLK110" in keys
+
+
+def test_only_crossing_threshold_blocks(capsys):
+    """阻断条件收敛：只有「从阈值前升到阈值后」才拦。
+
+    其余三种情况（同版本重刷、越过阈值后升级、降级）都放行，
+    避免用户被锁死在当前版本。
+    """
+    snap_old = _Snap("OPD2404", "OP5D77L1", "OPD2404_14.1.0.226(CN01)")
+    snap_new = _Snap("OPD2404", "OP5D77L1", "OPD2404_16.0.5.1201(CN01)")
+
+    # 跨阈值 → 拦
+    ret, _ = _warn(_Info("OPD2404_16.0.5.1201(CN01)"), snap_old, capsys)
+    assert ret is True
+
+    # 同版本重刷 → 放
+    ret, _ = _warn(_Info("OPD2404_16.0.5.1201(CN01)"), snap_new, capsys)
+    assert ret is False
+
+    # 越过阈值后升级 → 放
+    ret, _ = _warn(_Info("OPD2404_16.0.10.600(CN01)"), snap_new, capsys)
+    assert ret is False
+
+    # 降级 → 放（降级已无 9008 可失）
+    ret, _ = _warn(_Info("OPD2404_14.1.0.226(CN01)"), snap_new, capsys)
+    assert ret is False

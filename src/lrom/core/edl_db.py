@@ -210,13 +210,17 @@ def check_edl_risk(
             details=base_details,
         )
 
-    # 已在阈值之后
+    # 已在阈值之后：区分「同版本重刷 / 升级」与「降级」。
+    # 降级已在上面拦截，这里只剩 package_version >= device_version。
     if fuse_ver is not None and dev_ver >= fuse_ver:
+        upgraded = pkg_ver > dev_ver
         return EdlResult(
             risk=EdlRisk.LIKELY_FUSED,
             message=(
-                f"设备当前版本已在 {rec.fuse_version} 之后，9008 免授权可能已被熔断。"
+                f"设备当前版本 {device_version} 已在 {rec.fuse_version} 之后，"
+                "9008 免授权可能已被熔断。"
                 "该状态由设备侧决定，无法通过刷 ROM 恢复。"
+                + ("本次为升级，不会改变熔断状态。" if upgraded else "本次为同版本重刷，不会改变熔断状态。")
             ),
             record=rec,
             package_version=pkg_ver_text,
