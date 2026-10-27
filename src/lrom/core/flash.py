@@ -240,6 +240,7 @@ class FlashExecutor:
         wipe_data: bool = False,
         both_slots: bool = False,
         recreate_logical: bool = True,
+        target_slot: str | None = None,
     ) -> None:
         self.plan = plan
         self.image_dir = image_dir
@@ -255,6 +256,9 @@ class FlashExecutor:
         self.wipe_data = wipe_data
         self.both_slots = both_slots
         self.recreate_logical = recreate_logical
+        #: 若指定，进 fastboot 后先 set-active 到该槽再刷（物理分区是裸名，
+        #: 落哪个槽由当前激活槽决定）。用于「刷到另一个槽」。
+        self.target_slot = target_slot
         self.result = FlashResult(plan=plan)
         self._stop = False
 
@@ -521,6 +525,15 @@ class FlashExecutor:
                 self.result.error = "无法进入 Fastboot 模式，已中止"
                 self.result.finished_at = time.time()
                 return self.result
+            # 进 fastboot 后若需刷到指定槽，先切槽再刷
+            if self.target_slot:
+                assert self.fb is not None
+                self._notify_mode(Phase.FASTBOOT)
+                sr = self._set_active_slot(self.target_slot)
+                if sr is not None and not sr:
+                    self.result.error = f"切换到 {self.target_slot} 槽失败，已中止"
+                    self.result.finished_at = time.time()
+                    return self.result
         else:
             self._notify_mode(Phase.FASTBOOT)
 
@@ -632,6 +645,16 @@ class FlashExecutor:
             except Exception:
                 pass
         return False
+
+    def _set_active_slot(self, slot: str) -> bool | None:
+        """把活动槽切到指定槽。返回 True 成功 / False 失败 / None 跳过。"""
+        if self.fb is None:
+            return None
+        slot = slot.lstrip("_")
+        if slot not in ("a", "b"):
+            return None
+        res = self.fb.run(f"--set-active={slot}", timeout=120)
+        return self.fb.ok(res)
 
     def _enter_fastbootd(self, timeout: float = 300.0) -> bool:
         """从 fastboot 切换到 fastbootd 并等待就绪。

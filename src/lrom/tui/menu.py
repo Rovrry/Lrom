@@ -270,8 +270,8 @@ def build_menu(sess: "Session", env_ok: bool) -> str:
     lines = [
         f"  {_color('─ 刷写流程 ────────────────────────────────────', d)}",
         f"   {_color('1', C.CYAN)}) 解全量包          选择 ROM 包并解出镜像",
-        f"   {_color('2', C.CYAN)}) 预演检查          ★ 不写设备，先看能不能刷",
-        f"   {_color('3', C.CYAN)}) 线刷全量包        真正写入设备（需确认）",
+        f"   {_color('2', C.CYAN)}) 预演检查          ★ 不写设备，预演「刷到另一槽」",
+        f"   {_color('3', C.CYAN)}) 线刷全量包        刷到另一槽（自动切槽）",
         f"   {_color('4', C.CYAN)}) 只刷指定分区      手动选择分区",
         "",
         f"  {_color('─ 安全 ────────────────────────────────────────', d)}",
@@ -290,7 +290,7 @@ def build_menu(sess: "Session", env_ok: bool) -> str:
         f"   {_color('13', C.CYAN)}) 关于",
         "",
         f"  {_color('─ 高级（高风险）───────────────────────────────', d)}",
-        f"   {_color('14', C.CYAN)}) BL 回锁           平刷两次后回锁（会清空数据，慎用）",
+        f"   {_color('14', C.CYAN)}) BL 回锁           两槽刷好后回锁（会清空数据，慎用）",
         "",
         f"   {_color('0', C.CYAN)}) 退出",
     ]
@@ -587,8 +587,8 @@ def run_menu() -> int:
 
     handlers = {
         "1": _flow_unpack,
-        "2": lambda s_, m: _flow_flash(s_, m, dry_run=True),
-        "3": lambda s_, m: _flow_flash(s_, m, dry_run=False),
+        "2": lambda s_, m: _flow_flash(s_, m, dry_run=True, to_opposite_slot=True),
+        "3": lambda s_, m: _flow_flash(s_, m, dry_run=False, to_opposite_slot=True),
         "4": lambda s_, m: _flow_flash(s_, m, dry_run=False, pick=True),
         "5": _menu_backup,
         "6": _menu_arb,
@@ -813,7 +813,10 @@ def _flow_unpack(sess: Session, mon) -> None:
     pause()
 
 
-def _flow_flash(sess: Session, mon, *, dry_run: bool, pick: bool = False) -> None:
+def _flow_flash(
+    sess: Session, mon, *, dry_run: bool, pick: bool = False,
+    to_opposite_slot: bool = False,
+) -> None:
     import argparse
 
     from ..cli import cmd_flash
@@ -848,6 +851,8 @@ def _flow_flash(sess: Session, mon, *, dry_run: bool, pick: bool = False) -> Non
         both_slots=False,
         no_recreate_logical=False,
         adb_port=None,
+        to_opposite_slot=to_opposite_slot,
+        slot=None,
     )
 
     if dry_run:
@@ -997,10 +1002,12 @@ def _menu_selfcheck(sess: Session, mon) -> None:
 def _menu_relock(sess: "Session", mon) -> None:
     """菜单 14：BL 回锁（高风险）。
 
-    交互分三种：
-      1) 让 Lrom 平刷两槽（当前槽 ↔ 相反槽各一遍），再回锁
-      2) 用户已自己在设备上装好两次系统，直接回锁
-      3) 用户确认两槽已是原厂，直接回锁
+    前提：两个槽的关键分区都必须是原厂签名镜像。
+    「线刷全量包」（菜单 3）现在默认刷到**另一个槽**，所以用户跑两次
+    菜单 3（每次自动切槽）即可保证两槽都刷了原厂包。刷完后用本菜单回锁。
+
+    交互：
+      1) 我已线刷/安装好两个槽，直接回锁
       0) 退出
     """
     import argparse
@@ -1016,10 +1023,13 @@ def _menu_relock(sess: "Session", mon) -> None:
     print()
     print(f"  {_color('回锁会清空全部用户数据。', C.YELLOW)}")
     print()
+    print("  如何保证两槽都是原厂：")
+    print(f"    · 用菜单 3「线刷全量包」刷两次——它会自动刷到另一个槽，")
+    print(f"      每次刷完活动槽切换，两次之后两槽都是这次刷的原厂包。")
+    print(f"    · 或你已在设备本地安装过两次系统 ROM。")
+    print()
     print("  请选择方式：")
-    print(f"    {_color('1', C.CYAN)}) 让 Lrom 平刷两槽（推荐，自动刷当前槽+相反槽）")
-    print(f"    {_color('2', C.CYAN)}) 我已自己安装过两次系统 ROM，直接回锁")
-    print(f"    {_color('3', C.CYAN)}) 我已确认两槽都是原厂，直接回锁")
+    print(f"    {_color('1', C.CYAN)}) 我已刷好两个槽，直接回锁")
     print(f"    {_color('0', C.CYAN)}) 退出")
     print()
     choice = ask("请选择", "0").strip().lower()
@@ -1027,12 +1037,12 @@ def _menu_relock(sess: "Session", mon) -> None:
         print(f"  {_color('已取消', C.DIM)}")
         pause()
         return
-    if choice not in ("1", "2", "3"):
+    if choice != "1":
         print(f"  {_color('无效选择，已取消', C.YELLOW)}")
         pause()
         return
 
-    # 1) 需要完整包做平刷；2/3) 直接回锁，但为做包适配性校验仍需指定包
+    # 需要完整包做包适配性校验（不写设备，仅核对机型/包类型）
     default = str(sess.package) if sess.package and Path(sess.package).exists() else ""
     if default:
         print()
@@ -1054,41 +1064,16 @@ def _menu_relock(sess: "Session", mon) -> None:
         pause()
         return
 
-    # 方式 1：用已解包镜像平刷；2/3 不刷，images 可为空
-    img_dir = None
-    skip_flash = choice in ("2", "3")
-    if not skip_flash:
-        try:
-            _s = Session()
-            _s.package = p
-            _s.work_dir = sess.work_dir
-            if _s.unpacked:
-                img_dir = str(_s.image_dir)
-        except Exception:  # noqa: BLE001
-            img_dir = None
-        if img_dir:
-            print(f"  使用已解包镜像: {img_dir}")
-        else:
-            print(f"  {_color('注意：未找到已解包镜像，将直接从包内读取（较慢）。', C.DIM)}")
-            print(f"  {_color('建议先执行菜单 1 解包。', C.DIM)}")
-    else:
-        print()
-        if choice == "2":
-            print(f"  {_color('已选择：你自己已安装过两次系统 ROM', C.CYAN)}")
-        else:
-            print(f"  {_color('已选择：你确认两槽都是原厂', C.CYAN)}")
-        print("  将跳过平刷，直接校验并回锁。")
     print()
-
     rc = cmd_relock(
         argparse.Namespace(
             package=p,
-            images=img_dir,
+            images=None,
             dry_run=False,
             yes=False,
             adb_port=None,
             check_model=False,
-            skip_flash=skip_flash,
+            skip_flash=True,
         )
     )
     if rc != 0:

@@ -63,9 +63,9 @@ class FakeFastboot:
     in_fastbootd = False
 
 
-def make_executor(plan, tmp_path, fb, *, dry_run=False):
+def make_executor(plan, tmp_path, fb, *, dry_run=False, target_slot=None):
     """构造执行器，并关闭真实的模式切换等待（测试里由 FakeFastboot 直接返回）。"""
-    ex = FlashExecutor(plan, tmp_path, fb=fb, dry_run=dry_run)
+    ex = FlashExecutor(plan, tmp_path, fb=fb, dry_run=dry_run, target_slot=target_slot)
     # 已在 fastboot 模式：_ensure_fastboot 会立即返回 True
     ex._detect_mode = lambda: "fastboot"
     # 模拟切换成功，不真的等 180 秒
@@ -581,3 +581,44 @@ def test_progress_disabled_for_small_partitions(tmp_path):
 
     # 所有镜像都小于 20MB，不应触发 ticker
     assert calls == []
+
+
+def test_target_slot_sets_active_before_flash(tmp_path):
+    """指定 target_slot 时，进入 fastboot 后先 set-active 再刷。"""
+    fb = FakeFastboot()
+    plan = make_plan(tmp_path)
+    ex = make_executor(plan, tmp_path, fb, target_slot="b")
+    ex.run()
+    calls = [list(c) for c in fb.calls]
+    # 第一条应是 --set-active=b
+    assert any("--set-active=b" in c for c in calls)
+    idx_set = next(i for i, c in enumerate(calls) if "--set-active=b" in c)
+    idx_flash = next(i for i, c in enumerate(calls) if c and c[0] == "flash")
+    assert idx_set < idx_flash, "set-active 必须在 flash 之前"
+
+
+def test_target_slot_aborts_if_set_active_fails(tmp_path):
+    """set-active 失败则中止，不继续刷。"""
+    class _FailSetActive(FakeFastboot):
+        def run(self, *args, timeout=None):
+            self.calls.append(list(args))
+            if args and args[0].startswith("--set-active"):
+                return RunResult(argv=list(args), exit_code=1, stdout="", stderr="FAILED")
+            return super().run(*args, timeout=timeout)
+
+    fb = _FailSetActive()
+    plan = make_plan(tmp_path)
+    ex = make_executor(plan, tmp_path, fb, target_slot="b")
+    result = ex.run()
+    assert result.error  # 有错误
+    # 不应有任何 flash 调用
+    assert not any(c and c[0] == "flash" for c in fb.calls)
+
+
+def test_no_target_slot_no_set_active(tmp_path):
+    """不指定 target_slot 时不切槽。"""
+    fb = FakeFastboot()
+    plan = make_plan(tmp_path)
+    ex = make_executor(plan, tmp_path, fb)
+    ex.run()
+    assert not any("--set-active" in str(c) for c in fb.calls)

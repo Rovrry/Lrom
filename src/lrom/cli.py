@@ -844,8 +844,30 @@ def cmd_flash(args: argparse.Namespace) -> int:
     from .device.runner import FastbootRunner as _FB
 
     fb_early = _FB()
-    # 允许显式指定槽位（relock 平刷两遍时用）；否则用设备当前槽
-    _target_slot = getattr(args, "slot", None) or dev.slot
+    # 槽位决定：
+    #   1) 显式 args.slot 优先（relock 用）
+    #   2) --to-opposite-slot：刷到与当前相反的那个槽（平刷两槽用）
+    #   3) 否则用设备当前槽
+    cur_slot = (dev.slot or "a").lstrip("_")
+    if cur_slot not in ("a", "b"):
+        cur_slot = "a"
+    if getattr(args, "slot", None):
+        _target_slot = args.slot
+    elif getattr(args, "to_opposite_slot", False):
+        _target_slot = "b" if cur_slot == "a" else "a"
+    else:
+        _target_slot = cur_slot
+
+    # 若目标槽与当前激活槽不同，必须在刷写前切过去——物理分区是裸名，
+    # 实际落到哪个槽由 fastboot 当前激活槽决定。
+    if _target_slot != cur_slot and dev.mode is DeviceMode.FASTBOOT:
+        print(paint(f"  切换活动槽 {cur_slot} → {_target_slot}…", C.CYAN))
+        _sw = fb_early.run(f"--set-active={_target_slot}", timeout=120)
+        if not fb_early.ok(_sw):
+            print(paint(f"  ⛔ 切换槽位失败：{_sw.combined.strip()[:200]}", C.RED))
+            return 1
+        print(f"  {paint('✓', C.GREEN)} 已切到 {_target_slot} 槽，将刷入该槽")
+
     plan = build_plan(
         info.manifest,
         package_path=str(info.path),
@@ -931,7 +953,7 @@ def cmd_flash(args: argparse.Namespace) -> int:
     print()
     print(paint("╭─ 刷写计划 " + "─" * 46, C.BOLD))
     print(f"│ 包     : {info.path.name}")
-    print(f"│ 设备   : {dev.model} ({dev.codename})  槽位: _{dev.slot}")
+    print(f"│ 设备   : {dev.model} ({dev.codename})  当前槽位: _{cur_slot}")
     print(f"│ 阶段一 : {paint(f'Fastboot  {len(fb_ops)} 个分区', C.CYAN)}")
     print(f"│ 阶段二 : {paint(f'FastbootD {len(fbd_ops)} 个分区', C.CYAN)}")
     print(f"│ 总量   : {plan.total_bytes / 2**30:.2f} GB")
@@ -947,8 +969,10 @@ def cmd_flash(args: argparse.Namespace) -> int:
     print(f"│ ARB    : {paint(arb_cmp.verdict.value, arb_color)}")
     if getattr(args, "both_slots", False):
         print(f"│ 槽位   : {paint('A + B 双槽刷写', C.CYAN)}")
+    elif _target_slot != cur_slot:
+        print(f"│ 槽位   : {paint(f'刷到 _{_target_slot}（当前 _{cur_slot}，将先切槽）', C.CYAN)}")
     else:
-        print(f"│ 槽位   : 仅 _{dev.slot or 'a'}")
+        print(f"│ 槽位   : 仅 _{_target_slot}")
     if not getattr(args, "no_recreate_logical", False):
         print(f"│ 逻辑分区: 写入前会 delete + create（清理 COW 层）")
     print(paint("╰" + "─" * 56, C.BOLD))
@@ -1009,6 +1033,8 @@ def cmd_flash(args: argparse.Namespace) -> int:
         both_slots=getattr(args, "both_slots", False),
         recreate_logical=not getattr(args, "no_recreate_logical", False),
         on_notice=lambda msg: print(paint(f"  {msg}", C.YELLOW)),
+        # 若目标槽与当前不同，进入 fastboot 后先切槽再刷
+        target_slot=(_target_slot if _target_slot != cur_slot else None),
     )
 
     # ---- 刷写进行中的实时提示（防止用户误以为卡死而拔线）----
@@ -1276,29 +1302,24 @@ def cmd_relock(args: argparse.Namespace) -> int:
     )
     if suit is not PackageSuitability.OK:
         if suit is PackageSuitability.UNKNOWN and is_platform_name(dev.codename):
-            # fastboot 下只有平台名，无法核对机型。回锁必须确认机型一致，
-            # 所以要求用户先去 ADB 模式让 Lrom 核对，再回来回锁。
-            print(paint("  ⛔ 无法核对机型：设备在 fastboot 下只返回平台名", C.RED + C.BOLD))
+            # fastboot 下只有平台名（如 pineapple），无法比对机型。
+            # 只警告，不阻断 —— 由用户自行确认包与机型一致后继续回锁。
+            print(paint("  ⚠ 无法自动核对机型（fastboot 只返回平台名）", C.YELLOW + C.BOLD))
             print(f"     当前读到：{dev.codename or '?'}（SoC 平台名，不是机型）")
             print()
-            print("     回锁必须确认「包与设备机型一致」，fastboot 下读不到机型，")
-            print("     所以请先在开机（ADB）状态核对一次：")
-            print(paint("       1) 开机进入系统，连上数据线", C.CYAN))
-            print(paint("       2) 运行  ./lrom relock <包> --check-model", C.CYAN))
-            print(paint("          （或先跑 ./lrom devices 确认机型）", C.CYAN))
-            print(paint("       3) 确认无误后  adb reboot bootloader 再回锁", C.CYAN))
+            print("     请自行确认：此包机型/区域与本机【完全一致】，")
+            print("     且两个槽都是本机原厂签名镜像。")
             print()
-            print("     也可直接自行确认：此包机型/区域与本机【完全一致】。")
+        else:
+            print(paint("  ⛔ 回锁包校验未通过，拒绝继续：", C.RED + C.BOLD))
+            for r in suit_reasons:
+                print(f"     · {r}")
+            print()
+            print("  回锁要求：同机型的完整官方全量包。")
             print()
             return 1
-        print(paint("  ⛔ 回锁包校验未通过，拒绝继续：", C.RED + C.BOLD))
-        for r in suit_reasons:
-            print(f"     · {r}")
-        print()
-        print("  回锁要求：同机型的完整官方全量包。")
-        print()
-        return 1
-    print(paint("  ✓ 包校验：同机型完整官方全量包", C.GREEN))
+    if suit is PackageSuitability.OK:
+        print(paint("  ✓ 包校验：同机型完整官方全量包", C.GREEN))
 
     plan = build_relock_plan(
         device_model=dev.model or "",
