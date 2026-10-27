@@ -257,6 +257,110 @@ def _clear_screen() -> None:
     sys.stdout.flush()
 
 
+def _print_device_facts(snap) -> None:
+    """在主页头部补印关键设备信息：Android 版本、BL 锁、9008 提示。"""
+    from ..core.edl_db import EdlRisk, check_edl_risk
+
+    parts: list[str] = []
+
+    if snap.android_version:
+        parts.append(f"Android {snap.android_version}")
+
+    if snap.locked == "0":
+        parts.append(_color("BL 已解锁", C.GREEN))
+    elif snap.locked == "1":
+        parts.append(_color("BL 已锁定", C.RED))
+    else:
+        parts.append(_color("BL 状态未知", C.YELLOW))
+
+    if parts:
+        print("              " + _color("·", C.DIM) + " " + "  ".join(parts))
+
+    # 9008 免授权：只在设备已处于/越过熔断版本时给一行提示，
+    # 详情放到解包与刷写流程里（避免每次进菜单都长段落输出）。
+    # 注意 model 与 codename 是两种标识（OPD2404 vs OP5D77L1），都要试。
+    edl = EdlRisk.UNKNOWN
+    for cand in (snap.model, snap.codename):
+        if not cand:
+            continue
+        edl = check_edl_risk(
+            package_version=snap.build_id or None,
+            device_version=snap.build_id or None,
+            model_code=cand,
+            codename=snap.codename or None,
+        ).risk
+        if edl is not EdlRisk.UNKNOWN:
+            break
+    if edl is EdlRisk.LIKELY_FUSED:
+        print(
+            "              "
+            + _color("! 9008 免授权可能已熔断（不可逆，降级无效）", C.YELLOW)
+        )
+
+
+def _warn_edl_risk(info, mon) -> None:
+    """在解包/刷写前提示 9008 免授权影响。
+
+    只做提醒，不阻断 —— 熔断意味着失去未来的自救通道，
+    而不是立刻变砖，决定权留给用户。
+    """
+    from ..core.edl_db import EdlRisk, check_edl_risk
+
+    snap = mon.snapshot if mon else None
+    device_ver = snap.build_id if (snap and snap.present) else None
+
+    # 设备侧能拿到的是代号（OP5D77L1），而库里记的是型号（OPD2404）。
+    # 包里的 product_name 是型号，优先用它；两者都传上去做匹配。
+    model_candidates = []
+    if getattr(info, "product_name", None):
+        model_candidates.append(info.product_name)
+    if getattr(info, "pre_device", None):
+        model_candidates.append(info.pre_device)
+    if snap and snap.present:
+        model_candidates.extend(x for x in (snap.model, snap.codename) if x)
+    model_code = model_candidates[0] if model_candidates else None
+
+    res = check_edl_risk(
+        package_version=info.version_name,
+        device_version=device_ver,
+        model_code=model_code,
+        codename=snap.codename if (snap and snap.present) else None,
+    )
+    # 若第一种标识没匹配上，再试其余候选
+    if res.risk is EdlRisk.UNKNOWN:
+        for cand in model_candidates[1:]:
+            alt = check_edl_risk(
+                package_version=info.version_name,
+                device_version=device_ver,
+                model_code=cand,
+                codename=snap.codename if (snap and snap.present) else None,
+            )
+            if alt.risk is not EdlRisk.UNKNOWN:
+                res = alt
+                break
+    if res.risk is EdlRisk.UNKNOWN or res.risk is EdlRisk.SAFE:
+        return
+
+    print()
+    if res.risk is EdlRisk.WILL_FUSE:
+        print(_color("  ┌─ ⚠ 9008 免授权将被永久熔断 " + "─" * 26, C.RED + C.BOLD))
+        print(f"  │ {res.message}")
+        print(f"  │ 包版本  : {res.package_version}")
+        print(f"  │ 设备版本: {res.device_version}")
+        print(_color("  │", C.RED))
+        print(_color("  │ 熔断后：失去 EDL 自主救砖通道，", C.RED))
+        print(_color("  │ 若 OCDT 损坏，售后也无法修复。", C.RED))
+        print(_color("  │ 降级【不能】恢复 —— 该状态由设备侧决定。", C.RED + C.BOLD))
+        print(_color("  └" + "─" * 46, C.RED + C.BOLD))
+    elif res.risk is EdlRisk.LIKELY_FUSED:
+        print(_color("  ! 9008 免授权：设备已越过熔断版本", C.YELLOW + C.BOLD))
+        print(f"    {res.message}")
+    elif res.risk is EdlRisk.DOWNGRADE_NO_RECOVER:
+        print(_color("  ! 降级操作提醒", C.YELLOW + C.BOLD))
+        print(f"    {res.message}")
+    print(_color("    判定依据：系统版本号推断，设备侧实际状态无法读取", C.DIM))
+
+
 def print_header(sess: Session, mon=None) -> None:
     _clear_screen()
     print()
@@ -283,6 +387,7 @@ def print_header(sess: Session, mon=None) -> None:
         print(line)
         if snap.build_id:
             print(f"              {_color(snap.build_id, C.DIM)}")
+        _print_device_facts(snap)
     else:
         print(f"  {_color('○', C.RED)} 设备    : {_color('未连接', C.RED)}")
         print(f"              {_color('请检查数据线与 USB 调试', C.DIM)}")
@@ -475,10 +580,15 @@ def _flow_unpack(sess: Session, mon) -> None:
     print("  请输入 ROM 包路径（.zip 文件，可直接把文件拖进终端）")
     if sess.package and sess.package.exists():
         print(f"  {_color('直接回车可沿用上次的选择', C.DIM)}")
+    print(_color("  输入 q 取消并返回主菜单", C.DIM))
     print()
 
     default = str(sess.package) if sess.package and sess.package.exists() else ""
     p = ask_path("ROM 包", default)
+    if p and p.name.lower() in ("q", "quit", "exit"):
+        print(f"  {_color('已取消，返回主菜单', C.DIM)}")
+        pause()
+        return
     if not p:
         if default:
             p = Path(default)
@@ -501,15 +611,39 @@ def _flow_unpack(sess: Session, mon) -> None:
     info = inspect_package(p)
 
     print()
+    print(_color("  ── ROM 包信息 " + "─" * 46, C.BOLD))
+    print(f"    文件      : {p}")
+    try:
+        print(f"    大小      : {p.stat().st_size / (1024 ** 3):.2f} GB")
+    except OSError:
+        pass
     if info.product_name:
-        print(f"    型号    : {info.product_name} ({info.pre_device or '?'})")
+        print(f"    型号      : {info.product_name} ({info.pre_device or '?'})")
     if info.version_name:
-        print(f"    版本    : {info.version_name}")
+        print(f"    版本      : {info.version_name}")
+    if info.display_os_version:
+        print(f"    显示版本  : {info.display_os_version}")
     if info.android_version:
-        print(f"    Android : {info.android_version}")
-    print(f"    包类型  : {info.kind.value}")
+        print(f"    Android   : {info.android_version}")
+    if info.security_patch:
+        print(f"    安全补丁  : {info.security_patch}")
+    if info.ota_id:
+        print(f"    OTA ID    : {info.ota_id}")
+    print(f"    包类型    : {info.kind.value}")
     if info.manifest:
-        print(f"    分区数  : {len(info.manifest.partitions)}")
+        total = 0
+        try:
+            total = sum(getattr(op, "data_length", 0) for part in info.manifest.partitions for op in part.operations)
+        except Exception:
+            total = 0
+        line = f"    分区数    : {len(info.manifest.partitions)}"
+        if total:
+            line += f"（共 {total / (1024 ** 3):.2f} GB）"
+        print(line)
+    print(f"    线刷判定  : {info.verdict.value}")
+
+    # ---- 9008 免授权提醒 ----
+    _warn_edl_risk(info, mon)
 
     if info.verdict is not Verdict.FLASHABLE:
         print()
@@ -608,6 +742,7 @@ def _flow_flash(sess: Session, mon, *, dry_run: bool, pick: bool = False) -> Non
     if dry_run:
         print()
         print(_color("  预演检查：只看能不能刷，不写入任何数据。", C.BOLD))
+        print(_color("  输入 q 可取消", C.DIM))
         print()
         cmd_flash(ns)
         pause()
@@ -616,14 +751,33 @@ def _flow_flash(sess: Session, mon, *, dry_run: bool, pick: bool = False) -> Non
     if pick:
         print()
         print("  输入要刷的分区名，空格分隔（例如: boot init_boot system）")
+        print(_color("  直接回车或输入 q 取消", C.DIM))
         raw = ask("分区")
-        if not raw:
+        if not raw or raw.strip().lower() in ("q", "quit", "exit"):
+            print(f"  {_color('已取消，返回主菜单', C.DIM)}")
+            pause()
             return
         ns.partitions = raw.split()
 
+    # 刷写前的 9008 提醒 —— 这是最后一次无害的提醒点
+    try:
+        from ..core.package import inspect_package as _inspect
+
+        _info = _inspect(sess.package) if sess.package else None
+        if _info is not None:
+            _warn_edl_risk(_info, mon)
+    except Exception:
+        pass
+
     print()
     print(f"  {_color('刷写选项：', C.BOLD)}")
-    if confirm("清空用户数据？（降级或救砖必须选 y）"):
+    print(_color("  在下一步输入 q 可退出，不会写入任何数据", C.DIM))
+    ans = ask("清空用户数据？（降级或救砖必须选 y，直接回车保留数据，输入 q 退出）")
+    if ans.strip().lower() in ("q", "quit", "exit"):
+        print(f"  {_color('已取消，未写入任何数据', C.DIM)}")
+        pause()
+        return
+    if ans.strip().lower() in ("y", "yes", "是"):
         ns.wipe = True
 
     cmd_flash(ns)

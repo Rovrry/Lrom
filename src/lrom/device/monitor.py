@@ -30,6 +30,10 @@ class DeviceSnapshot:
     codename: str = ""
     slot: str = ""
     build_id: str = ""
+    #: Android 大版本号，如 ``16``
+    android_version: str = ""
+    #: "0" = 已解锁 / "1" = 已锁定 / "" = 未知（沿用 discover.Device 语义）
+    locked: str = ""
     checked_at: float = 0.0
 
     def key(self) -> tuple:
@@ -64,6 +68,9 @@ def probe_once(*, adb_server_port: int | None = None) -> DeviceSnapshot:
     snap.codename = dev.codename or ""
     snap.slot = dev.slot or ""
     snap.build_id = dev.build_id or ""
+    snap.android_version = getattr(dev, "android_version", None) or ""
+    locked = getattr(dev, "locked", None)
+    snap.locked = "" if locked is None else str(locked)
     snap.mode = {
         DeviceMode.ADB: "adb",
         DeviceMode.FASTBOOT: "fastboot",
