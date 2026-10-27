@@ -220,3 +220,94 @@ def test_abi_family_helper():
     assert _abi_family(None) is None
     assert _asset_arch("foo-arm64-v8a.apk") == "arm64"
     assert _asset_arch("foo-release.apk") is None
+
+
+# ---------------------------------------------------------------------------
+# 安装后删除本地包
+# ---------------------------------------------------------------------------
+
+
+def _run_fetch_with(tmp_path, monkeypatch, install_status):
+    """跑一遍 cmd_fetch_manager，返回下载目录里剩余文件。"""
+    import lrom.cli as cli_mod
+    import lrom.core.manager_fetch as mf
+
+    fake_asset = SimpleNamespace(name="KernelSU.apk", size=100, sha256="0" * 64, url="")
+    fake_release = SimpleNamespace(tag="v1", prerelease=False, published_at=None, assets=[fake_asset])
+
+    monkeypatch.setattr(mf, "resolve_manager_source", lambda k: SimpleNamespace(label="KSU", repo="t/x"))
+    monkeypatch.setattr(mf, "fetch_latest_release", lambda s, channel=None: fake_release)
+    monkeypatch.setattr(mf, "pick_asset", lambda r, s, **k: fake_asset)
+
+    def _dl(asset, dest, *, filename=None, expected_sha256=None, on_progress=None):
+        f = Path(dest) / "KernelSU.apk"
+        f.write_bytes(b"x" * 100)
+        return f
+
+    monkeypatch.setattr(mf, "download_asset", _dl)
+    monkeypatch.setattr(mf, "install_manager_apk", lambda p, **k: install_status)
+
+    ns = SimpleNamespace(source="ksu", channel="stable", dest=str(tmp_path), asset=None, yes=True, adb_port=None)
+    cli_mod.cmd_fetch_manager(ns)
+    return list(tmp_path.glob("*.apk"))
+
+
+def test_apk_deleted_after_successful_install(tmp_path, monkeypatch, capsys):
+    """安装成功后应删除本地安装包。"""
+    remaining = _run_fetch_with(tmp_path, monkeypatch, ("installed", "Success"))
+    assert remaining == []
+    assert "已删除本地安装包" in capsys.readouterr().out
+
+
+def test_apk_kept_when_no_device(tmp_path, monkeypatch, capsys):
+    """无设备时必须保留本地包，供手动安装。"""
+    remaining = _run_fetch_with(tmp_path, monkeypatch, ("no_device", "未连接设备"))
+    assert len(remaining) == 1
+
+
+def test_apk_kept_when_install_failed(tmp_path, monkeypatch, capsys):
+    """安装失败时也必须保留本地包。"""
+    remaining = _run_fetch_with(tmp_path, monkeypatch, ("failed", "Failure"))
+    assert len(remaining) == 1
+
+
+# ---------------------------------------------------------------------------
+# 获取 Root 的退出选项
+# ---------------------------------------------------------------------------
+
+
+def test_ensure_manager_q_returns_abort(monkeypatch, capsys):
+    """管理器选择里输入 q → 返回 _ABORT。"""
+    import lrom.tui.menu as menu
+
+    monkeypatch.setattr(menu, "ask", lambda p, d="": "q")
+    r = menu._ensure_root_manager(None)
+    assert r is menu._ABORT
+
+
+def test_menu_root_aborts_without_running_cmd_root(monkeypatch, capsys):
+    """管理器返回 _ABORT 时，_menu_root 不应进入 cmd_root。"""
+    import lrom.tui.menu as menu
+    from pathlib import Path as _P
+
+    monkeypatch.setattr(menu, "_find_stock_init_boot", lambda s: _P("x.img"))
+    monkeypatch.setattr(menu, "_verify_device_for_root", lambda *a, **k: True)
+    monkeypatch.setattr(menu, "confirm", lambda p, word=None: True)
+    monkeypatch.setattr(menu, "pause", lambda m="": None)
+    monkeypatch.setattr(menu, "_ensure_root_manager", lambda mon: menu._ABORT)
+
+    called = {"root": False}
+
+    class _Sess:
+        package = None
+        work_dir = _P("work")
+
+    # cmd_root 是函数内 import，用 sys.modules 拦截
+    import lrom.cli as cli_mod
+
+    monkeypatch.setattr(cli_mod, "cmd_root", lambda ns: called.__setitem__("root", True) or 0, raising=False)
+
+    menu._menu_root(_Sess(), None)
+    out = capsys.readouterr().out
+    assert "已取消" in out
+    assert called["root"] is False

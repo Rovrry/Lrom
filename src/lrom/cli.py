@@ -1662,6 +1662,14 @@ def cmd_fetch_manager(args: argparse.Namespace) -> int:
     )
     if status == "installed":
         print(paint("  ✓ 已自动安装到设备", C.GREEN))
+        # 装进设备后就删掉本地安装包，避免残留在磁盘上
+        # （只在安装成功时删；失败或没设备时必须留着，供手动安装）
+        try:
+            abs_path.unlink()
+            print(paint("  ✓ 已删除本地安装包（无需保留）", C.DIM))
+        except OSError as exc:  # noqa: BLE001
+            print(paint(f"  ! 本地安装包删除失败：{exc}", C.YELLOW))
+            print(f"    {abs_path}")
     elif status == "no_device":
         print(paint("  ! 未检测到设备，APK 已保存在本机", C.YELLOW))
         print(f"    {detail}")

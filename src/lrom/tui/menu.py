@@ -1133,8 +1133,20 @@ def _menu_root(sess: "Session", mon) -> None:
         return
     print()
 
+    # 明示退出方式，并给一次"开始前"的确认，避免走进去才发现想退出
+    print(f"  {_color('按 q 可随时退出，返回主菜单（不会写入任何数据）', C.DIM)}")
+    if not confirm("开始获取 Root 流程？"):
+        print(f"  {_color('已取消，返回主菜单', C.DIM)}")
+        pause()
+        return
+    print()
+
     # ---- 根管理器 APK（内置下载）----
-    _ensure_root_manager(mon)
+    mgr = _ensure_root_manager(mon)
+    if mgr is _ABORT:
+        print(f"  {_color('已取消，返回主菜单', C.DIM)}")
+        pause()
+        return
     print()
 
     print(f"  {_color('提示', C.BOLD)}：")
@@ -1160,6 +1172,10 @@ def _menu_root(sess: "Session", mon) -> None:
         print()
         print(f"  {_color('流程未完成。', C.YELLOW)}")
     pause()
+
+
+#: 用户在交互中选择「退出整个流程」时返回的哨兵值
+_ABORT = object()
 
 
 def _ensure_root_manager(mon) -> Path | None:
@@ -1190,8 +1206,11 @@ def _ensure_root_manager(mon) -> Path | None:
             )
         print(f"    {_color('d', C.CYAN)}) 重新下载一个")
         print(f"    {_color('s', C.CYAN)}) 跳过（稍后自己安装）")
+        print(f"    {_color('q', C.CYAN)}) 退出流程")
         print()
         pick = ask("请选择", "1").strip().lower()
+        if pick in ("q", "quit", "exit"):
+            return _ABORT
         if pick == "s":
             print(f"  {_color('已跳过管理器环节', C.DIM)}")
             return None
@@ -1213,8 +1232,11 @@ def _ensure_root_manager(mon) -> Path | None:
         src = MANAGER_SOURCES[key]
         print(f"    {_color(str(i), C.CYAN)}) {src.label:<20s} {src.repo}")
     print(f"    {_color('s', C.CYAN)}) 跳过下载")
+    print(f"    {_color('q', C.CYAN)}) 退出流程")
     print()
     pick = ask("请选择", "1").strip().lower()
+    if pick in ("q", "quit", "exit"):
+        return _ABORT
     if pick == "s":
         print(f"  {_color('已跳过管理器环节', C.DIM)}")
         return None
@@ -1228,8 +1250,12 @@ def _ensure_root_manager(mon) -> Path | None:
     print(f"  {_color('渠道', C.BOLD)}：")
     print(f"    {_color('1', C.CYAN)}) 正式版（stable）")
     print(f"    {_color('2', C.CYAN)}) 测试版（beta，可能有 bug）")
+    print(f"    {_color('q', C.CYAN)}) 退出流程")
     print()
-    channel = "beta" if ask("请选择", "1").strip() == "2" else "stable"
+    ch = ask("请选择", "1").strip().lower()
+    if ch in ("q", "quit", "exit"):
+        return _ABORT
+    channel = "beta" if ch == "2" else "stable"
 
     print()
     import argparse
@@ -1248,7 +1274,8 @@ def _ensure_root_manager(mon) -> Path | None:
     )
     if rc != 0:
         return None
-    # cmd_fetch_manager 内部已完成自动安装；这里回找最新 APK 便于返回
+    # cmd_fetch_manager 内部已完成安装；安装成功后本地包会被删除，
+    # 此时无需返回路径。若因无设备/失败而保留了包，则回找最新 APK 返回。
     apks = sorted(
         workdir.glob("*.apk"), key=lambda p: p.stat().st_mtime, reverse=True
     )
@@ -1264,13 +1291,21 @@ def _install_apk_to_device(apk: Path, mon) -> None:
     status, detail = install_manager_apk(apk)
     if status == "installed":
         print(f"  {_color('✓ 已安装', C.GREEN)}")
+        # 装进设备后删掉本地包，避免残留
+        try:
+            apk.unlink()
+            print(f"  {_color('✓ 已删除本地安装包', C.DIM)}")
+        except OSError as exc:  # noqa: BLE001
+            print(f"  {_color(f'! 删除失败: {exc}', C.YELLOW)}")
+            print(f"    {apk.resolve()}")
     elif status == "no_device":
         print(f"  {_color('! 未检测到设备', C.YELLOW)}")
         print(f"    {detail}")
+        print(f"  {_color('本机位置', C.DIM)}: {apk.resolve()}")
     else:
         print(f"  {_color('⛔ 安装失败', C.RED)}")
         print(f"    {detail}")
-    print(f"  {_color('本机位置', C.DIM)}: {apk.resolve()}")
+        print(f"  {_color('本机位置', C.DIM)}: {apk.resolve()}")
 
 
 def _menu_fetch_manager(sess: "Session", mon) -> None:
