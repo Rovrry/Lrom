@@ -1364,7 +1364,14 @@ def cmd_root(args: argparse.Namespace) -> int:
     print(paint("  [1/5] 留存原厂镜像…", C.CYAN))
     try:
         stock_copy = rt.save_stock_image(
-            image, workdir=workdir, partition=plan.partition
+            image,
+            workdir=workdir,
+            partition=plan.partition,
+            device_model=getattr(device, "model", None),
+            device_codename=getattr(device, "codename", None),
+            device_build_id=getattr(device, "build_id", None),
+            source_package=str(image),
+            source_version=getattr(device, "build_id", None),
         )
     except OSError as exc:
         print(paint(f"  ⛔ 保存原厂镜像失败：{exc}", C.RED))

@@ -163,6 +163,19 @@ def input_with_redraw(
 # 状态
 # ---------------------------------------------------------------------------
 
+def _sanitize_dirname(name: str) -> str:
+    """把版本号/文件名整理成安全的目录名。
+
+    去掉路径分隔符和 shell 敏感字符，保留字母数字与 . _ -。
+    ``OPD2404_16.0.5.1201(CN01)`` → ``OPD2404_16.0.5.1201_CN01``
+    """
+    import re
+
+    cleaned = re.sub(r"[^\w.\-]+", "_", name.strip())
+    cleaned = cleaned.strip("._-")
+    return cleaned or "unnamed"
+
+
 class Session:
     """菜单会话状态。"""
 
@@ -171,6 +184,9 @@ class Session:
 
         self.package: Path | None = None
         self.work_dir: Path = Path("work")
+        # 包版本号缓存（避免每次进菜单都解析 ZIP）
+        self._cached_version: str | None = None
+        self._cached_version_for: str | None = None
 
         cfg = load_config()
         if wd := cfg.get("work_dir"):
@@ -181,14 +197,51 @@ class Session:
 
     @property
     def image_dir(self) -> Path | None:
-        """解包产物目录。自动在几个常见位置查找。"""
+        """解包产物目录。
+
+        优先按**包内版本号**命名（如 ``work/OPD2404_16.0.5.1201``），
+        因为下载来的包文件名常被随机化或改过，不可靠。
+        版本号读不出来时退回按文件名（stem）命名。
+
+        查找顺序：版本号目录 → 文件名目录 → unpacked/ 下的同名目录。
+        """
         if not self.package:
             return None
-        stem = self.package.stem
-        for c in (self.work_dir / stem, Path("unpacked") / stem):
-            if c.exists() and any(c.glob("*.img")):
-                return c
-        return self.work_dir / stem
+        names = self._image_dir_names()
+        for name in names:
+            for base in (self.work_dir, Path("unpacked")):
+                c = base / name
+                if c.exists() and any(c.glob("*.img")):
+                    return c
+        return self.work_dir / names[0]
+
+    def _image_dir_names(self) -> list[str]:
+        """返回该包可能的解包目录名，优先版本号。"""
+        names: list[str] = []
+        ver = self._package_version()
+        if ver:
+            names.append(_sanitize_dirname(ver))
+        stem = self.package.stem if self.package else ""
+        if stem:
+            names.append(_sanitize_dirname(stem))
+        return names or ["unnamed"]
+
+    def _package_version(self) -> str | None:
+        """读取包内版本号（带缓存，避免每次进菜单都解析 ZIP）。"""
+        if self._cached_version_for == (str(self.package) if self.package else None):
+            return self._cached_version
+        self._cached_version_for = str(self.package) if self.package else None
+        self._cached_version = None
+        if self.package and Path(self.package).exists():
+            try:
+                from ..core.package import inspect_package
+
+                info = inspect_package(Path(self.package))
+                self._cached_version = info.version_name or None
+            except Exception:  # noqa: BLE001
+                self._cached_version = None
+        return self._cached_version
+
 
     @property
     def unpacked(self) -> bool:
@@ -714,6 +767,8 @@ def _flow_unpack(sess: Session, mon) -> None:
     assert out is not None
     print()
     print(f"  输出目录: {out}")
+    if out.name == _sanitize_dirname(sess._package_version() or ""):
+        print(_color("            （按包内版本号命名）", C.DIM))
 
     # 清除该目录下上一次的解包产物，避免新旧混合：
     # 若上一个包与本包的镜像集合不同（少一个 dtbo.img 之类），
@@ -970,6 +1025,84 @@ def _find_stock_init_boot(sess: "Session"):
     return None
 
 
+def _verify_device_for_root(snap, sess: "Session", *, action: str) -> bool:
+    """root / 回滚 root 前的机型与版本核对。
+
+    为什么需要：这两个操作都会往设备写 init_boot。如果解出的镜像
+    来自**别的机型**，或者设备当前系统版本与镜像不匹配，刷进去
+    轻则 root 失效，重则无法开机。
+
+    核对项：
+    1. 设备已连接、处于 ADB 模式
+    2. BL 已解锁
+    3. 若当前选的包能读到版本/机型，且设备已连接 → 机型必须一致
+
+    返回 True 表示可以继续。
+    """
+    if not snap or not getattr(snap, "present", False):
+        print(_color("  ⛔ 未检测到设备", C.RED + C.BOLD))
+        print("  请连接设备并确认能识别（./lrom devices）。")
+        return False
+
+    if snap.mode != "adb":
+        print(_color(f"  ⛔ 设备当前处于 {snap.mode} 模式", C.RED + C.BOLD))
+        print(f"  {action}需要读取设备信息，请先开机启动再操作。")
+        return False
+
+    # BL 锁
+    if snap.locked == "1":
+        print(_color("  ⛔ Bootloader 未解锁，无法刷写", C.RED + C.BOLD))
+        print("  请先完成 OEM 解锁。注意：解锁会清空全部用户数据。")
+        return False
+    if snap.locked == "":
+        print(_color("  ⚠ 无法确认 Bootloader 是否已解锁，请自行确认", C.YELLOW))
+
+    # 机型一致性（仅当能读到包信息时）
+    info = None
+    if sess and sess.package and Path(sess.package).exists():
+        try:
+            from ..core.package import inspect_package
+
+            info = inspect_package(Path(sess.package))
+        except Exception:  # noqa: BLE001
+            info = None
+
+    if info is not None and (info.pre_device or info.product_name):
+        dev_key = snap.codename or snap.model or ""
+        pkg_key = info.pre_device or info.product_name
+        mismatch = False
+        if info.pre_device and snap.codename and info.pre_device != snap.codename:
+            mismatch = True
+        if info.product_name and snap.model and info.product_name != snap.model:
+            mismatch = True
+        if mismatch:
+            print(_color("  ⛔ 当前 ROM 包与设备机型不一致，拒绝执行", C.RED + C.BOLD))
+            print()
+            print(f"    设备      : {snap.model or '?'}（代号 {snap.codename or '?'}）")
+            print(f"    当前包适用: {info.product_name or '?'}（代号 {info.pre_device or '?'}）")
+            print()
+            print("    用别的机型的 init_boot 做 root 会直接导致无法开机。")
+            print("    请先解包与你设备匹配的 ROM 包。")
+            return False
+        if dev_key and pkg_key:
+            print(f"  {_color('✓', C.GREEN)} 机型匹配: {snap.model or snap.codename}")
+
+    # 系统版本提示（不阻断，仅告知，便于用户核对）
+    if snap.build_id:
+        print(f"  {_color('·', C.DIM)} 设备系统版本: {snap.build_id}")
+        if info is not None and info.version_name:
+            print(f"  {_color('·', C.DIM)} 镜像来自包版本: {info.version_name}")
+            if info.version_name != snap.build_id:
+                print(
+                    _color(
+                        "  ! 镜像版本与设备当前版本不同 —— root 后可能出现"
+                        "模块加载失败，请确认这是你要的版本",
+                        C.YELLOW,
+                    )
+                )
+    return True
+
+
 def _menu_root(sess: "Session", mon) -> None:
     """菜单 7：获取 Root。"""
     import argparse
@@ -988,6 +1121,14 @@ def _menu_root(sess: "Session", mon) -> None:
 
     print(f"  原厂镜像: {image}")
     print()
+
+    # 机型与版本核对（危险写操作之前）
+    snap = mon.refresh_now() if mon else None
+    if not _verify_device_for_root(snap, sess, action="root"):
+        pause()
+        return
+    print()
+
     print(f"  {_color('提示', C.BOLD)}：")
     print("    · 刷写前会把原厂镜像备份到 root-work/，可随时回滚")
     print("    · 需要 KernelSU / Magisk 管理器 APK（菜单 8 可下载）")
@@ -1083,7 +1224,24 @@ def _menu_root_rollback(sess: "Session", mon) -> None:
     print("  找到以下原厂备份：")
     for i, p in enumerate(backups, 1):
         size_mb = p.stat().st_size / 1024 / 1024
-        print(f"    {_color(str(i), C.CYAN)}) {p.name}  ({size_mb:.1f} MB)")
+        # 读取备份元数据里记录的机型，便于核对
+        meta_tag = ""
+        meta_file = p.with_suffix(".json")
+        if meta_file.exists():
+            try:
+                import json
+
+                meta = json.loads(meta_file.read_text(encoding="utf-8"))
+                bits = [
+                    meta.get("device_model"),
+                    meta.get("device_build_id"),
+                ]
+                bits = [b for b in bits if b]
+                if bits:
+                    meta_tag = "  " + _color("[" + " · ".join(bits) + "]", C.DIM)
+            except Exception:  # noqa: BLE001
+                pass
+        print(f"    {_color(str(i), C.CYAN)}) {p.name}  ({size_mb:.1f} MB){meta_tag}")
     print()
     pick = ask("请选择要刷回的镜像", "1")
     try:
@@ -1096,6 +1254,14 @@ def _menu_root_rollback(sess: "Session", mon) -> None:
     print()
     print(f"  即将把 {_color(target.name, C.BOLD)} 刷入 init_boot 分区。")
     print()
+
+    # 机型与版本核对（危险写操作之前）—— 防止把别的机型的镜像刷进来
+    snap = mon.refresh_now() if mon else None
+    if not _verify_device_for_root(snap, sess, action="回滚 Root"):
+        pause()
+        return
+    print()
+
     print("  注意：")
     print("    · 刷回后 root 会消失")
     print("    · 会自动把设备切到 fastboot 模式")

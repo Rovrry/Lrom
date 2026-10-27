@@ -397,8 +397,21 @@ def build_root_plan(
 # ---------------------------------------------------------------------------
 
 
-def save_stock_image(image: Path, *, workdir: Path, partition: str) -> Path:
+def save_stock_image(
+    image: Path,
+    *,
+    workdir: Path,
+    partition: str,
+    device_model: str | None = None,
+    device_codename: str | None = None,
+    device_build_id: str | None = None,
+    source_package: str | None = None,
+    source_version: str | None = None,
+) -> Path:
     """把原厂镜像另存一份，作为回滚用的底图。
+
+    附带记录设备机型与系统版本，回滚时可据此核对，避免把别的机型
+    的镜像刷回去。
 
     返回留存后的路径。
     """
@@ -416,6 +429,12 @@ def save_stock_image(image: Path, *, workdir: Path, partition: str) -> Path:
         "source": str(image),
         "size": dest.stat().st_size,
         "sha256": _sha256(dest),
+        # 机型与版本，供回滚时核对
+        "device_model": device_model or "",
+        "device_codename": device_codename or "",
+        "device_build_id": device_build_id or "",
+        "source_package": source_package or "",
+        "source_version": source_version or "",
     }
     (workdir / f"{partition}-stock-{stamp}.json").write_text(
         json.dumps(meta, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
