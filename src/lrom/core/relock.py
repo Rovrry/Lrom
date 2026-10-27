@@ -41,6 +41,7 @@ __all__ = [
     "RelockPlan",
     "PackageSuitability",
     "check_package_suitability",
+    "is_platform_name",
     "build_relock_plan",
     "verify_two_pass",
 ]
@@ -238,11 +239,26 @@ def check_package_suitability(
             ["读不到包的机型信息，无法确认是本机官方包，回锁需绝对确定"],
         )
 
-    # 机型核对：product_name 或 pre_device 任一与设备匹配即可
-    dev_keys = {k.upper() for k in (device_model, device_codename) if k}
+    # 过滤掉「平台名」——它们不是机型标识，无法用于比对
+    dev_keys = {
+        k.upper()
+        for k in (device_model, device_codename)
+        if k and not is_platform_name(k)
+    }
     pkg_keys = {k.upper() for k in (pkg_product_name, pkg_pre_device) if k}
 
-    if dev_keys and pkg_keys and not (dev_keys & pkg_keys):
+    # 设备侧只有平台名（如 fastboot 下的 pineapple）→ 无法比对机型。
+    # 这属于「无法确认」，不能判成「机型不符」（会误拦所有高通机型）。
+    if not dev_keys:
+        return (
+            PackageSuitability.UNKNOWN,
+            [
+                "设备当前处于 fastboot，只能读到平台名（如 pineapple），"
+                "无法核对机型。请自行确认此包与本机机型/区域完全一致后再回锁"
+            ],
+        )
+
+    if pkg_keys and dev_keys and not (dev_keys & pkg_keys):
         reasons.append(
             f"包与设备机型不符：包={sorted(pkg_keys)}，设备={sorted(dev_keys)}。"
             "跨区/异机型包回锁必砖（签名对不上）"
@@ -250,3 +266,26 @@ def check_package_suitability(
         return (PackageSuitability.WRONG_MODEL, reasons)
 
     return (PackageSuitability.OK, [])
+
+
+#: 高通/联发科的「平台名」（SoC 代号），不是机型标识。
+#: fastboot `getvar product` 在部分机型返回这些，而不是机型代号。
+_PLATFORM_NAMES = frozenset(
+    {
+        "pineapple",   # SM8650 / 8 Gen 3
+        "kalama",      # SM8550 / 8 Gen 2
+        "taro",        # SM8450 / 8 Gen 1
+        "lahaina",     # SM8350 / 888
+        "waipio",      # SM8475
+        "sunrise",     # MT6xxx 系
+        "mt6989", "mt6983", "mt6895",
+        "cape", "blair", "parrot", "alto", "kona", "miami",
+    }
+)
+
+
+def is_platform_name(name: str | None) -> bool:
+    """判断一个名称是不是 SoC 平台名（而非机型标识）。"""
+    if not name:
+        return False
+    return name.strip().lower() in _PLATFORM_NAMES

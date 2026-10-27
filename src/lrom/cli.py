@@ -252,6 +252,11 @@ def build_parser() -> argparse.ArgumentParser:
         "-i", "--images", default=None, help="已解包的镜像目录（省略则用包内镜像）"
     )
     pl.add_argument("--dry-run", action="store_true", help="只打印计划，不写设备")
+    pl.add_argument(
+        "--check-model",
+        action="store_true",
+        help="仅在 ADB 模式下核对包与机型是否匹配（不写设备）",
+    )
     pl.add_argument("--yes", action="store_true", help="跳过交互确认（危险）")
     pl.add_argument("--adb-port", type=int, default=None, help="adb server 端口")
     pl.set_defaults(func=cmd_relock)
@@ -1164,6 +1169,7 @@ def cmd_relock(args: argparse.Namespace) -> int:
         PackageSuitability,
         build_relock_plan,
         check_package_suitability,
+        is_platform_name,
         verify_two_pass,
     )
     from .device.discover import DeviceMode, detect
@@ -1202,9 +1208,42 @@ def cmd_relock(args: argparse.Namespace) -> int:
         print("     回锁需要设备处于 fastboot（bootloader）模式。")
         print()
         return 1
+
+    # --check-model：只在 ADB 模式下核对包与机型是否匹配，不做任何写操作。
+    # 用途：fastboot 下读不到真实机型（只有平台名），需先开机核对一次。
+    if getattr(args, "check_model", False):
+        if dev.mode is not DeviceMode.ADB:
+            print(paint("  ⚠ --check-model 需在开机（ADB）模式下运行", C.YELLOW))
+            print("     请先开机连上设备再试。")
+            print()
+            return 1
+        print(f"  设备    : {dev.model or '?'}（代号 {dev.codename or '?'}）")
+        print(f"  包机型  : {info.product_name or '?'}（代号 {info.pre_device or '?'}）")
+        suit_c, reasons_c = check_package_suitability(
+            pkg_product_name=info.product_name,
+            pkg_pre_device=info.pre_device,
+            pkg_is_full_ota=(info.kind is PackageKind.OTA_FULL),
+            device_model=dev.model,
+            device_codename=dev.codename,
+        )
+        if suit_c is PackageSuitability.OK:
+            print(paint("  ✓ 机型匹配，此包适合本机回锁", C.GREEN + C.BOLD))
+            print()
+            print("  下一步：")
+            print(paint("    adb reboot bootloader", C.CYAN))
+            print(paint(f"    ./lrom relock {pkg}", C.CYAN))
+            print()
+            return 0
+        print(paint("  ⛔ 机型不匹配，此包不能用于本机回锁：", C.RED + C.BOLD))
+        for r in reasons_c:
+            print(f"     · {r}")
+        print()
+        return 1
+
     if dev.mode is not DeviceMode.FASTBOOT:
         print(paint(f"  ⛔ 设备当前不在 fastboot 模式（{dev.mode.value}）。", C.RED + C.BOLD))
         print("     请执行：adb reboot bootloader")
+        print(paint("     提示：可先开机运行 ./lrom relock <包> --check-model 核对机型", C.DIM))
         print()
         return 1
     if dev.locked is None:
@@ -1225,6 +1264,22 @@ def cmd_relock(args: argparse.Namespace) -> int:
         device_codename=dev.codename,
     )
     if suit is not PackageSuitability.OK:
+        if suit is PackageSuitability.UNKNOWN and is_platform_name(dev.codename):
+            # fastboot 下只有平台名，无法核对机型。回锁必须确认机型一致，
+            # 所以要求用户先去 ADB 模式让 Lrom 核对，再回来回锁。
+            print(paint("  ⛔ 无法核对机型：设备在 fastboot 下只返回平台名", C.RED + C.BOLD))
+            print(f"     当前读到：{dev.codename or '?'}（SoC 平台名，不是机型）")
+            print()
+            print("     回锁必须确认「包与设备机型一致」，fastboot 下读不到机型，")
+            print("     所以请先在开机（ADB）状态核对一次：")
+            print(paint("       1) 开机进入系统，连上数据线", C.CYAN))
+            print(paint("       2) 运行  ./lrom relock <包> --check-model", C.CYAN))
+            print(paint("          （或先跑 ./lrom devices 确认机型）", C.CYAN))
+            print(paint("       3) 确认无误后  adb reboot bootloader 再回锁", C.CYAN))
+            print()
+            print("     也可直接自行确认：此包机型/区域与本机【完全一致】。")
+            print()
+            return 1
         print(paint("  ⛔ 回锁包校验未通过，拒绝继续：", C.RED + C.BOLD))
         for r in suit_reasons:
             print(f"     · {r}")
