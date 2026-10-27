@@ -326,8 +326,6 @@ fastboot reboot      # 当前在 fastboot
 
 版本历史见 **[CHANGELOG.md](CHANGELOG.md)**。
 
-> ⚠️ **提交前请自查敏感信息**：设备序列号、本机路径、邮箱、token 一律不入库。
-
 ```bash
 # 运行测试
 python3 -m pytest tests/unit -q
