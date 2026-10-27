@@ -119,6 +119,45 @@ _ARCH_PATTERN = re.compile(
     r"(arm64|armeabi|aarch64|armv7|armeabi-v7a|x86|universal)", re.IGNORECASE
 )
 
+#: 特殊变体关键词。同一版本可能同时发布普通版与这些变体，
+#: 普通用户应默认用不带变体标记的正式包。
+#: - spoofed：AVC 日志伪装版（SukiSU 等），功能变体，非默认
+#: - nosu / noksu：不含内置 su 的变体
+#: - debug / test / legacy：开发或旧版
+_VARIANT_EXCLUDE = ("spoofed", "nosu", "noksu", "debug", "test", "legacy")
+
+#: 架构关键词 → 归一的架构族
+_ARCH_FAMILY = (
+    (re.compile(r"arm64|aarch64", re.I), "arm64"),
+    (re.compile(r"armeabi|armv7", re.I), "arm"),
+    (re.compile(r"x86_64|x86", re.I), "x86_64"),
+    (re.compile(r"riscv", re.I), "riscv64"),
+)
+
+
+def _asset_arch(name: str) -> str | None:
+    """从文件名推断架构族；无架构字样返回 None（视为通用包）。"""
+    for pat, fam in _ARCH_FAMILY:
+        if pat.search(name):
+            return fam
+    return None
+
+
+def _abi_family(abi: str | None) -> str | None:
+    """把设备 ABI 归一成架构族。"""
+    if not abi:
+        return None
+    a = abi.lower()
+    if "arm64" in a or "aarch64" in a:
+        return "arm64"
+    if "armeabi" in a or "armv7" in a:
+        return "arm"
+    if "x86" in a:
+        return "x86_64"
+    if "riscv" in a:
+        return "riscv64"
+    return None
+
 
 @dataclass
 class ReleaseAsset:
@@ -263,15 +302,22 @@ def _parse_release(data: dict) -> Release:
 
 
 def pick_asset(
-    release: Release, source: ManagerSource, *, want_apk: bool = True
+    release: Release,
+    source: ManagerSource,
+    *,
+    want_apk: bool = True,
+    device_abi: str | None = None,
 ) -> ReleaseAsset:
     """从 Release 里挑出合适的那一个文件。
 
     规则（宁可报错也不猜错）：
-      1. 匹配 source.asset_pattern
-      2. 排除 debug/test/legacy/x86(非 arm) 等明显不适用的
-      3. 多个候选时优先「不含架构字样」的通用包
-      4. 仍无法唯一确定 -> 抛错并列出全部候选，让用户自己选
+
+    1. 匹配 source.asset_pattern
+    2. 排除 debug/test/legacy/x86(非 arm) 等明显不适用的
+    3. 排除特殊变体（spoofed / nosu / noksu 等），普通用户用普通版
+    4. 有设备 ABI 时，排除架构不符的（无架构字样的通用包不受影响）
+    5. 多个候选时优先「不含架构字样」的通用包
+    6. 仍无法唯一确定 -> 抛错并列出全部候选，让用户自己选
     """
     pattern = re.compile(source.asset_pattern)
     candidates = [a for a in release.assets if pattern.search(a.name)]
@@ -283,14 +329,25 @@ def pick_asset(
             f"{source.asset_pattern} 的文件。\n可用的 asset：{names}"
         )
 
-    if want_apk and len(candidates) > 1:
-        filtered = [
-            a
-            for a in candidates
-            if not any(k in a.name.lower() for k in _APK_EXCLUDE)
-        ]
-        if filtered:
-            candidates = filtered
+    def _narrow(pred) -> None:
+        """按条件收窄候选；收窄后若为空则保留原候选（避免过度过滤）。"""
+        nonlocal candidates
+        if len(candidates) <= 1:
+            return
+        kept = [a for a in candidates if pred(a)]
+        if kept:
+            candidates = kept
+
+    if want_apk:
+        _narrow(lambda a: not any(k in a.name.lower() for k in _APK_EXCLUDE))
+        # 特殊变体：spoofed / nosu 等，普通用户默认不用
+        _narrow(lambda a: not any(k in a.name.lower() for k in _VARIANT_EXCLUDE))
+        # 架构匹配：有设备 ABI 时优先同架构
+        fam = _abi_family(device_abi)
+        if fam is not None:
+            _narrow(
+                lambda a: _asset_arch(a.name) in (None, fam)
+            )
 
     if len(candidates) == 1:
         return candidates[0]

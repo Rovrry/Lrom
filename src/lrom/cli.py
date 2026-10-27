@@ -1578,6 +1578,21 @@ def cmd_fetch_manager(args: argparse.Namespace) -> int:
         print(f"  发布时间: {release.published_at}")
     print()
 
+    # 读取设备架构，用于挑选匹配的 APK（无设备则按通用包处理）
+    device_abi = None
+    try:
+        from .device.discover import DeviceMode as _DM
+        from .device.discover import detect as _detect
+
+        _dev = _detect(adb_server_port=getattr(args, "adb_port", None))
+        if _dev is not None and _dev.mode is _DM.ADB:
+            device_abi = getattr(_dev, "abi", None)
+    except Exception:  # noqa: BLE001
+        device_abi = None
+    if device_abi:
+        print(f"  设备架构: {device_abi}")
+        print()
+
     try:
         if args.asset:
             asset = next(
@@ -1589,7 +1604,7 @@ def cmd_fetch_manager(args: argparse.Namespace) -> int:
                     f"Release 里没有 {args.asset!r}。可用：{names}"
                 )
         else:
-            asset = mf.pick_asset(release, source)
+            asset = mf.pick_asset(release, source, device_abi=device_abi)
     except mf.FetchError as exc:
         print(paint(f"  ⛔ {exc}", C.RED))
         print()

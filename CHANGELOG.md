@@ -2,6 +2,35 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.5.3] - 2026-10-27
+
+### 修复：同版本多个 APK 候选时无法确定
+
+**现象**：SukiSU v4.2.1-r2 同时发布了
+`...release-spoofed.apk` 与 `...release.apk`（大小完全相同），
+选择时报「有多个候选文件，无法自动确定」。
+
+根因：`spoofed` 是 **AVC 日志伪装**的功能变体（见该版本更新说明
+`feat(avc-spoof)`），不是架构差异，但旧的过滤规则不认识它 ——
+两个文件都不含架构字样、都不在排除列表，于是"宁可报错也不猜"。
+
+修正：新增 `_VARIANT_EXCLUDE`（spoofed / nosu / noksu / debug /
+test / legacy），普通用户默认选不带这些变体标记的正式包。
+
+### 新增：按设备架构识别 APK / asset
+
+以前只看**文件名**有没有架构字样，不知道**设备**是什么架构。
+
+- `discover.Device` 新增 `abi` 字段，从 `ro.product.cpu.abi` 读取
+- `pick_asset` 新增 `device_abi` 参数：有设备时排除架构不符的候选，
+  无架构字样的通用包不受影响
+- 下载前打印设备架构（如 `arm64-v8a`），便于核对
+
+真机实测（平板 OPD2404，arm64-v8a）：SukiSU 正确选中普通版、
+校验通过、自动安装，设备上确认 `com.sukisu.ultra` 存在。
+
+测试 330 -> 335。
+
 ## [0.5.2] - 2026-10-27
 
 ### 改进：下载 root 管理器内置进「获取 Root」

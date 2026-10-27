@@ -129,7 +129,7 @@ def test_fetch_manager_reports_absolute_path(tmp_path, monkeypatch, capsys):
     )
     monkeypatch.setattr(mf, "resolve_manager_source", lambda k: SimpleNamespace(label="KSU", repo="tiankou/x"))
     monkeypatch.setattr(mf, "fetch_latest_release", lambda s, channel=None: fake_release)
-    monkeypatch.setattr(mf, "pick_asset", lambda r, s: fake_asset)
+    monkeypatch.setattr(mf, "pick_asset", lambda r, s, **kw: fake_asset)
 
     def _fake_download(asset, dest, *, filename=None, expected_sha256=None, on_progress=None):
         d = Path(dest)
@@ -147,3 +147,76 @@ def test_fetch_manager_reports_absolute_path(tmp_path, monkeypatch, capsys):
     assert "保存位置" in out
     # 必须是绝对路径
     assert str(tmp_path.resolve()) in out or str((tmp_path / "KernelSU.apk").resolve()) in out
+
+
+# ---------------------------------------------------------------------------
+# asset 选择：特殊变体排除 + 架构识别
+# ---------------------------------------------------------------------------
+
+
+def _rel(names):
+    from lrom.core.manager_fetch import Release, ReleaseAsset
+
+    return Release(
+        tag="v1",
+        prerelease=False,
+        published_at="",
+        html_url="",
+        assets=[ReleaseAsset(n, "u", 100) for n in names],
+    )
+
+
+def _src(key="sukisu"):
+    from lrom.core.manager_fetch import resolve_manager_source
+
+    return resolve_manager_source(key)
+
+
+def test_spoofed_variant_is_skipped():
+    """spoofed 是 AVC 伪装变体，普通用户应选不带 spoofed 的正式包。"""
+    from lrom.core.manager_fetch import pick_asset
+
+    rel = _rel([
+        "SukiSU_v4.2.1-r2_41068-release-spoofed.apk",
+        "SukiSU_v4.2.1-r2_41068-release.apk",
+    ])
+    picked = pick_asset(rel, _src("sukisu"), device_abi="arm64-v8a")
+    assert picked.name == "SukiSU_v4.2.1-r2_41068-release.apk"
+    assert "spoofed" not in picked.name
+
+
+def test_nosu_variant_is_skipped():
+    from lrom.core.manager_fetch import pick_asset
+
+    rel = _rel(["X-release-nosu.apk", "X-release.apk"])
+    picked = pick_asset(rel, _src("sukisu"))
+    assert picked.name == "X-release.apk"
+
+
+def test_arch_matches_device_abi():
+    """有设备 ABI 时选同架构的包。"""
+    from lrom.core.manager_fetch import pick_asset
+
+    rel = _rel(["KernelSU_arm64-v8a.apk", "KernelSU_x86_64.apk"])
+    picked = pick_asset(rel, _src("ksu"), device_abi="arm64-v8a")
+    assert "arm64" in picked.name
+
+
+def test_generic_apk_preferred_over_arch():
+    """通用包优先于带架构字样的包。"""
+    from lrom.core.manager_fetch import pick_asset
+
+    rel = _rel(["KernelSU_arm64-v8a.apk", "KernelSU_release.apk", "KernelSU_x86_64.apk"])
+    picked = pick_asset(rel, _src("ksu"), device_abi="arm64-v8a")
+    assert picked.name == "KernelSU_release.apk"
+
+
+def test_abi_family_helper():
+    from lrom.core.manager_fetch import _abi_family, _asset_arch
+
+    assert _abi_family("arm64-v8a") == "arm64"
+    assert _abi_family("armeabi-v7a") == "arm"
+    assert _abi_family("x86_64") == "x86_64"
+    assert _abi_family(None) is None
+    assert _asset_arch("foo-arm64-v8a.apk") == "arm64"
+    assert _asset_arch("foo-release.apk") is None

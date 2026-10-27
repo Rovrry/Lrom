@@ -29,6 +29,8 @@ class Device:
     android_version: str | None = None
     slot: str | None = None
     locked: str | None = None
+    #: CPU 架构，如 ``arm64-v8a`` / ``armeabi-v7a`` / ``x86_64``
+    abi: str | None = None
 
     def describe(self) -> str:
         lines = [f"设备序列号: {self.serial}", f"当前模式  : {self.mode.value}"]
@@ -208,6 +210,9 @@ def _read_adb_device(adb: AdbRunner, serial: str) -> Device:
     dev.slot = _normalize_slot(adb.getprop("ro.boot.slot_suffix").lstrip("_")) or None
 
     dev.locked = _read_adb_locked(adb)
+
+    # CPU 架构（用于挑选匹配的 APK / 内核模块）
+    dev.abi = adb.getprop("ro.product.cpu.abi") or None
 
     # 欧加系：产品名常在 ro.product.name / ro.build.product
     dev.product_name = (
