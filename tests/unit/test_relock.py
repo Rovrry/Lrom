@@ -128,8 +128,8 @@ def test_multiple_reasons_all_reported():
 def test_plan_contains_two_pass_steps():
     p = build_relock_plan(device_model="OPD2404", current_slot="a")
     text = p.describe()
-    assert "第一次平刷" in text
-    assert "第二次平刷" in text
+    assert "第一轮平刷" in text
+    assert "第二轮平刷" in text
     assert "flashing lock" in text
     assert "清空全部用户数据" in text
 
@@ -161,7 +161,7 @@ def _mock_pkg(monkeypatch):
 def _ns(**kw):
     from types import SimpleNamespace
 
-    base = dict(package="/tmp/x.zip", images=None, dry_run=True, yes=False, adb_port=None, slot=None, check_model=False)
+    base = dict(package="/tmp/x.zip", images=None, dry_run=True, yes=False, adb_port=None, slot=None, check_model=False, skip_flash=False)
     base.update(kw)
     return SimpleNamespace(**base)
 
@@ -380,3 +380,61 @@ def test_check_model_flag_adb_ok(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert rc == 0
     assert "机型匹配" in out
+
+
+def test_plan_skip_flash_has_no_pass_steps():
+    """skip_flash 时计划不应出现平刷步骤，只有回锁。"""
+    p = build_relock_plan(current_slot="a", skip_flash=True)
+    text = p.describe()
+    assert "第一轮平刷" not in text
+    assert "第二轮平刷" not in text
+    assert "跳过平刷" in text
+    assert "flashing lock" in text
+
+
+def test_plan_alternates_opposite_slot():
+    """平刷计划应刷到相反槽再刷回原槽。"""
+    from lrom.core.relock import build_relock_plan
+
+    p_a = build_relock_plan(current_slot="a")
+    t_a = p_a.describe()
+    assert "b 槽" in t_a  # 当前 a → 先刷 b
+    assert "a 槽" in t_a  # 再刷回 a
+
+    p_b = build_relock_plan(current_slot="b")
+    t_b = p_b.describe()
+    assert "a 槽" in t_b  # 当前 b → 先刷 a
+
+
+def test_skip_flash_only_calls_lock(monkeypatch):
+    """skip_flash 模式只调用 flashing lock，不调用 set-active/flash。"""
+    import lrom.cli as cli
+    import lrom.device.discover as disc
+    import lrom.core.package as pkg
+    import lrom.device.runner as runner_mod
+
+    fake = SimpleNamespace(
+        verdict=pkg.Verdict.FLASHABLE,
+        manifest=SimpleNamespace(partitions=[SimpleNamespace(name="boot")]),
+        product_name="OPD2404", pre_device="OP5D77L1", version_name="16.0.5.1201",
+        kind=pkg.PackageKind.OTA_FULL,
+    )
+    monkeypatch.setattr(pkg, "inspect_package", lambda p: fake)
+    monkeypatch.setattr(disc, "detect", lambda adb_server_port=None: SimpleNamespace(
+        mode=disc.DeviceMode.FASTBOOT, locked="0", model="OPD2404",
+        codename="OP5D77L1", slot="a", serial="S1"))
+
+    calls = []
+
+    class _FB:
+        def __init__(self, *a, **k): pass
+        def run(self, *args, **k):
+            calls.append(args)
+            return SimpleNamespace(exit_code=0, stdout="OKAY", stderr="", combined="OKAY")
+        def ok(self, r): return True
+
+    monkeypatch.setattr(runner_mod, "FastbootRunner", _FB)
+
+    rc = cli.cmd_relock(_ns(dry_run=False, yes=True, skip_flash=True))
+    assert rc == 0
+    assert calls == [("flashing", "lock")]

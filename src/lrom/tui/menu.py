@@ -997,7 +997,11 @@ def _menu_selfcheck(sess: Session, mon) -> None:
 def _menu_relock(sess: "Session", mon) -> None:
     """菜单 14：BL 回锁（高风险）。
 
-    必须先平刷两次完整系统包（A/B 槽各一遍），校验通过才回锁。
+    交互分三种：
+      1) 让 Lrom 平刷两槽（当前槽 ↔ 相反槽各一遍），再回锁
+      2) 用户已自己在设备上装好两次系统，直接回锁
+      3) 用户确认两槽已是原厂，直接回锁
+      0) 退出
     """
     import argparse
 
@@ -1006,18 +1010,32 @@ def _menu_relock(sess: "Session", mon) -> None:
     print()
     print(f"  {_color('BL 回锁', C.RED + C.BOLD)}")
     print()
-    print(f"  {_color('⚠ 高危操作', C.RED + C.BOLD)}：回锁要求两个槽里都是完整、")
-    print("    一致的原厂系统。否则回锁后设备会变砖，且没有解锁通道自救。")
+    print(f"  {_color('⚠ 回锁前提', C.RED + C.BOLD)}：两个槽的关键分区都必须是")
+    print("    本机的原厂签名镜像（不是 root / 三方 ROM / 跨区包）。")
+    print("    否则回锁后设备会变砖，且没有解锁通道自救。")
     print()
-    print("    Lrom 会先平刷两次完整系统包（A 槽、B 槽各一遍），")
-    print("    两次都成功且分区一致时才允许回锁。回锁会清空全部数据。")
+    print(f"  {_color('回锁会清空全部用户数据。', C.YELLOW)}")
     print()
-    print(f"  {_color('按 q 可随时退出', C.DIM)}")
+    print("  请选择方式：")
+    print(f"    {_color('1', C.CYAN)}) 让 Lrom 平刷两槽（推荐，自动刷当前槽+相反槽）")
+    print(f"    {_color('2', C.CYAN)}) 我已自己安装过两次系统 ROM，直接回锁")
+    print(f"    {_color('3', C.CYAN)}) 我已确认两槽都是原厂，直接回锁")
+    print(f"    {_color('0', C.CYAN)}) 退出")
     print()
+    choice = ask("请选择", "0").strip().lower()
+    if choice in ("0", "q", "quit", "exit"):
+        print(f"  {_color('已取消', C.DIM)}")
+        pause()
+        return
+    if choice not in ("1", "2", "3"):
+        print(f"  {_color('无效选择，已取消', C.YELLOW)}")
+        pause()
+        return
 
-    # 需要用户指定完整包
+    # 1) 需要完整包做平刷；2/3) 直接回锁，但为做包适配性校验仍需指定包
     default = str(sess.package) if sess.package and Path(sess.package).exists() else ""
     if default:
+        print()
         print(f"  当前 ROM 包: {default}")
     p = ask_path("完整系统包路径（.zip）", default)
     if p and p.name.lower() in ("q", "quit", "exit"):
@@ -1036,21 +1054,30 @@ def _menu_relock(sess: "Session", mon) -> None:
         pause()
         return
 
-    # 镜像目录：优先用已解包的（若存在），否则让 cmd_flash 用包内镜像
+    # 方式 1：用已解包镜像平刷；2/3 不刷，images 可为空
     img_dir = None
-    try:
-        _s = Session()
-        _s.package = p
-        _s.work_dir = sess.work_dir
-        if _s.unpacked:
-            img_dir = str(_s.image_dir)
-    except Exception:  # noqa: BLE001
-        img_dir = None
-    if img_dir:
-        print(f"  使用已解包镜像: {img_dir}")
+    skip_flash = choice in ("2", "3")
+    if not skip_flash:
+        try:
+            _s = Session()
+            _s.package = p
+            _s.work_dir = sess.work_dir
+            if _s.unpacked:
+                img_dir = str(_s.image_dir)
+        except Exception:  # noqa: BLE001
+            img_dir = None
+        if img_dir:
+            print(f"  使用已解包镜像: {img_dir}")
+        else:
+            print(f"  {_color('注意：未找到已解包镜像，将直接从包内读取（较慢）。', C.DIM)}")
+            print(f"  {_color('建议先执行菜单 1 解包。', C.DIM)}")
     else:
-        print(f"  {_color('注意：未找到已解包镜像，将直接从包内读取（较慢）。', C.DIM)}")
-        print(f"  {_color('建议先执行菜单 1 解包。', C.DIM)}")
+        print()
+        if choice == "2":
+            print(f"  {_color('已选择：你自己已安装过两次系统 ROM', C.CYAN)}")
+        else:
+            print(f"  {_color('已选择：你确认两槽都是原厂', C.CYAN)}")
+        print("  将跳过平刷，直接校验并回锁。")
     print()
 
     rc = cmd_relock(
@@ -1060,6 +1087,8 @@ def _menu_relock(sess: "Session", mon) -> None:
             dry_run=False,
             yes=False,
             adb_port=None,
+            check_model=False,
+            skip_flash=skip_flash,
         )
     )
     if rc != 0:

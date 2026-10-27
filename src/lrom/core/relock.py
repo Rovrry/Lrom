@@ -109,23 +109,38 @@ def build_relock_plan(
     device_model: str = "",
     device_codename: str = "",
     current_slot: str = "",
+    skip_flash: bool = False,
 ) -> RelockPlan:
-    """生成回锁计划。不写设备。"""
-    slot = current_slot or "?"
+    """生成回锁计划。不写设备。
+
+    skip_flash=True 表示跳过平刷（用户自己已装好两槽 / 已确认原厂），
+    此时计划里只列校验与回锁步骤。
+    """
+    slot = (current_slot or "a").lstrip("_")
+    if slot not in ("a", "b"):
+        slot = "a"
+    other = "b" if slot == "a" else "a"
+
+    steps = ["确认设备处于已解锁状态（bootloader / fastboot 模式）"]
+    if skip_flash:
+        steps.append("（按选择跳过平刷，假定两槽已是原厂系统）")
+    else:
+        steps += [
+            f"第一轮平刷：刷完整系统包到 {other} 槽（相反槽），校验全部成功",
+            f"第二轮平刷：刷完整系统包回 {slot} 槽（原槽），校验全部成功",
+            "校验两次刷写：均无失败、分区集合一致、版本一致",
+            f"确认激活槽为 {slot}",
+        ]
+    steps += [
+        "执行 fastboot flashing lock 回锁",
+        "回锁后设备会清空数据并重启，请勿中断",
+    ]
+
     return RelockPlan(
         device_model=device_model,
         device_codename=device_codename,
         current_slot=slot,
-        steps=[
-            "确认设备处于已解锁状态（bootloader / fastboot 模式）",
-            "第一次平刷：刷完整系统包到 A 槽，校验全部成功",
-            "切换活动槽到 B 槽",
-            "第二次平刷：刷完整系统包到 B 槽，校验全部成功",
-            "校验两次刷写：均无失败、分区集合一致、版本一致",
-            "切回 A 槽（原起始槽）",
-            f"执行 fastboot {' '.join(('flashing', 'lock'))} 回锁",
-            "回锁后设备会清空数据并重启，请勿中断",
-        ],
+        steps=steps,
     )
 
 

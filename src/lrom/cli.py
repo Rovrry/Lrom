@@ -257,6 +257,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="仅在 ADB 模式下核对包与机型是否匹配（不写设备）",
     )
+    pl.add_argument(
+        "--skip-flash",
+        action="store_true",
+        help="跳过平刷两槽，直接回锁（假定两槽已是原厂，危险）",
+    )
     pl.add_argument("--yes", action="store_true", help="跳过交互确认（危险）")
     pl.add_argument("--adb-port", type=int, default=None, help="adb server 端口")
     pl.set_defaults(func=cmd_relock)
@@ -1180,13 +1185,19 @@ def cmd_relock(args: argparse.Namespace) -> int:
     print()
 
     # ---- 0) 绝对确认：回锁不可逆，输错就砖 ----
-    print(paint("  ⚠ 这是最高风险操作。回锁后如果两个槽的系统不一致，设备会变砖，", C.RED + C.BOLD))
-    print(paint("    且回锁后没有解锁通道可自救。", C.RED + C.BOLD))
+    print(paint("  ⚠ 这是最高风险操作。回锁的前提是：两个槽里的关键分区", C.RED + C.BOLD))
+    print(paint("    都是本机的原厂签名镜像（不是 root / 三方 ROM / 跨区包）。", C.RED + C.BOLD))
+    print(paint("    否则回锁后设备会变砖，且没有解锁通道可自救。", C.RED + C.BOLD))
     print()
-    print("  Lrom 会先平刷两次完整系统包（A 槽、B 槽各一遍），")
-    print("  只有两次都成功且分区一致时才允许回锁。")
+    if getattr(args, "skip_flash", False):
+        print(paint("  你已选择跳过平刷，直接回锁。", C.YELLOW))
+        print("  Lrom 只做包适配性与设备状态校验，然后执行 fastboot flashing lock。")
+    else:
+        print("  Lrom 会先平刷完整系统包到**两个槽**（当前槽 ↔ 相反槽各刷一遍），")
+        print("  把两槽都覆盖回这次刷的原厂镜像，再执行回锁。")
     print()
-    print(paint("  注意：平刷两遍保证的是「两槽一致」，不保证「是原厂签名」。", C.YELLOW))
+    print(paint("  注意：平刷目的是「洗回原厂签名」，不是「让版本号相同」——", C.YELLOW))
+    print(paint("  回锁变砖的真正原因是镜像无原厂签名，与两槽版本是否相同无关。", C.YELLOW))
     print(paint("  跨区包 / 第三方包即使刷两遍，签名仍对不上，回锁必砖。", C.YELLOW))
     print()
 
@@ -1293,6 +1304,7 @@ def cmd_relock(args: argparse.Namespace) -> int:
         device_model=dev.model or "",
         device_codename=dev.codename or "",
         current_slot=dev.slot or "",
+        skip_flash=getattr(args, "skip_flash", False),
     )
     print(plan.describe())
 
@@ -1364,31 +1376,62 @@ def cmd_relock(args: argparse.Namespace) -> int:
         rc = cmd_flash(ns)
         return (rc == 0, [])
 
-    # ---- 2) 第一次平刷（_flash_slot 内部会先 set-active 到 A）----
-    a_ok, a_failed = _flash_slot("a", "1/2")
-    if not a_ok:
-        print(paint("  ⛔ 第一次平刷失败，已中止，不会回锁。", C.RED + C.BOLD))
-        print(paint("     设备当前处于已刷一半的状态，请重新平刷完整包后再试。", C.RED))
+    cur = (dev.slot or "a").lstrip("_")
+    if cur not in ("a", "b"):
+        cur = "a"
+    other = "b" if cur == "a" else "a"
+
+    # ---- 若用户选择「跳过平刷，直接回锁」----
+    if getattr(args, "skip_flash", False):
+        print(paint("  已跳过平刷（按你的选择，假定两槽已是原厂系统）", C.YELLOW))
+        print("  仍会做包适配性与设备状态校验，然后直接回锁。")
+        print()
+        print(paint(f"  确认后直接执行 fastboot flashing lock…", C.CYAN))
+        res = fb.run("flashing", "lock", timeout=300)
+        if not fb.ok(res):
+            print(paint(f"  ⛔ 回锁命令失败：{res.combined.strip()[:200]}", C.RED + C.BOLD))
+            print("     设备可能仍处于解锁状态，请检查后重试。")
+            print()
+            return 1
+        print()
+        print(paint("  ✓ 回锁成功。设备会格式化数据并重启。", C.GREEN + C.BOLD))
+        print("     首次开机较慢（重新加密数据），属正常现象。")
+        print()
+        return 0
+
+    # ---- 2) 平刷两轮：当前槽 → 相反槽 → 刷回当前槽 ----
+    # 目的不是"让两槽版本一致"（版本不一致本身不是变砖原因），而是
+    # 把**两个槽都覆盖回这次刷的原厂镜像**，洗掉用户之前装过的
+    # root / 三方 ROM 残留，确保两槽都是原厂签名。
+    #
+    # 做法：读当前活动槽 cur，刷相反槽 other，再刷回 cur。
+    # 两轮都是完整包，最后两个槽都被这次的原厂镜像覆盖。
+    print(paint(f"  当前活动槽：{cur}  →  将刷 {other}，再刷回 {cur}", C.CYAN))
+    print()
+
+    first_ok, first_failed = _flash_slot(other, f"1/2（{other} 槽）")
+    if not first_ok:
+        print(paint("  ⛔ 第一轮平刷失败，已中止，不会回锁。", C.RED + C.BOLD))
+        print(paint("     设备当前处于刷了一半的状态，请重新平刷完整包后再试。", C.RED))
         print()
         return 1
 
-    # ---- 3) 第二次平刷（_flash_slot 内部会先 set-active 到 B）----
-    b_ok, b_failed = _flash_slot("b", "2/2")
-    if not b_ok:
-        print(paint("  ⛔ 第二次平刷失败，已中止，不会回锁。", C.RED + C.BOLD))
+    second_ok, second_failed = _flash_slot(cur, f"2/2（{cur} 槽）")
+    if not second_ok:
+        print(paint("  ⛔ 第二轮平刷失败，已中止，不会回锁。", C.RED + C.BOLD))
         print()
         return 1
 
     # ---- 5) 校验两次刷写 ----
     check = verify_two_pass(
-        pass_a_ok=a_ok,
-        pass_b_ok=b_ok,
+        pass_a_ok=first_ok,
+        pass_b_ok=second_ok,
         pass_a_partitions=pkg_partitions,
         pass_b_partitions=pkg_partitions,
         pass_a_version=pkg_version,
         pass_b_version=pkg_version,
-        pass_a_failed=a_failed,
-        pass_b_failed=b_failed,
+        pass_a_failed=first_failed,
+        pass_b_failed=second_failed,
     )
     print()
     if not check.can_relock:
@@ -1401,18 +1444,16 @@ def cmd_relock(args: argparse.Namespace) -> int:
         print()
         return 1
 
-    print(paint("  ✓ 两次平刷均成功，分区集合一致，版本一致", C.GREEN + C.BOLD))
+    print(paint(f"  ✓ 两槽都刷入了同一原厂包（{other} + {cur}），均成功", C.GREEN + C.BOLD))
     print()
 
-    # ---- 6) 切回原起始槽 ----
-    start_slot = dev.slot or "a"
-    if start_slot in ("a", "b"):
-        print(paint(f"  切回起始槽 {start_slot}…", C.CYAN))
-        res = fb.run(f"--set-active={start_slot}", timeout=120)
-        if not fb.ok(res):
-            print(paint("  ⛔ 切回起始槽失败，已中止，不会回锁。", C.RED + C.BOLD))
-            print()
-            return 1
+    # ---- 6) 确保激活槽回到原槽（第二轮已刷到 cur，这里再确认一次）----
+    print(paint(f"  确认激活槽为 {cur}…", C.CYAN))
+    res = fb.run(f"--set-active={cur}", timeout=120)
+    if not fb.ok(res):
+        print(paint("  ⛔ 切回原槽失败，已中止，不会回锁。", C.RED + C.BOLD))
+        print()
+        return 1
 
     # ---- 7) 回锁 ----
     print()
