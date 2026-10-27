@@ -160,7 +160,8 @@ adb install -r root-work/KernelSU_*.apk
 
 来源可选 `ksu` / `ksu-next` / `sukisu` / `magisk`，始终取 GitHub 最新发布。
 
-完整实现说明见 **[docs/ROOT-IMPLEMENTATION.md](docs/ROOT-IMPLEMENTATION.md)**。
+`lrom root` 会自动完成：校验 ramdisk、按内核版本推导 KMI、解包并 patch、
+刷入 init_boot，并在动手前把原厂镜像留存到 `root-work/`。
 
 失败可随时恢复，`lrom root` 会在刷写前把原厂镜像存到 `root-work/`：
 
@@ -320,15 +321,12 @@ fastboot reboot      # 当前在 fastboot
 
 ## 开发
 
-开发相关文档：
+开发记录（踩坑记录、实现方法、方案调研、实验报告）由作者本地留存，
+不在本仓库公开。仓库只包含源码与版本变更日志。
 
-- **[docs/DEVNOTES.md](docs/DEVNOTES.md)** —— 踩坑记录、开发规范、待办清单
-- **[docs/ROOT-IMPLEMENTATION.md](docs/ROOT-IMPLEMENTATION.md)** —— 自动化 root 的完整实现方法
-- **[docs/research/](docs/research/)** —— root 方案调研（KernelSU / Magisk / 欧加设备）
-- **[docs/ARB-实验报告.md](docs/ARB-实验报告.md)** —— ARB 熔断对照实验
+版本历史见 **[CHANGELOG.md](CHANGELOG.md)**。
 
 > ⚠️ **提交前请自查敏感信息**：设备序列号、本机路径、邮箱、token 一律不入库。
-> 详见 [DEVNOTES.md 第 1.9 节](docs/DEVNOTES.md)。
 
 ```bash
 # 运行测试

@@ -46,8 +46,9 @@ plans/
 # 解包产物
 unpacked/
 
-# 本地临时笔记（个人环境相关内容，不入库）
-docs/DEVELOPER.md
+# 开发记录与个人笔记一律本地留存，不上传 GitHub
+# （踩坑记录、root 实现方法、方案调研、实验报告）
+docs/
 *.local.md
 
 # 待 token 加 workflow 权限后再提交
