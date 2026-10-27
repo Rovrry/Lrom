@@ -659,7 +659,7 @@ unpacked/rom/init_boot.img  → 21 个标准 ramdisk 条目，无 KSU 痕迹
 
 ```
 请选择: 7
-  设备序列号: ***REDACTED***
+  设备序列号: ***(已隐去)***
   ...
   出错了: name 'pause' is not defined
 NameError: name 'pause' is not defined
