@@ -293,6 +293,7 @@ def test_menu_root_aborts_without_running_cmd_root(monkeypatch, capsys):
     monkeypatch.setattr(menu, "_find_stock_init_boot", lambda s: _P("x.img"))
     monkeypatch.setattr(menu, "_verify_device_for_root", lambda *a, **k: True)
     monkeypatch.setattr(menu, "confirm", lambda p, word=None: True)
+    monkeypatch.setattr(menu, "ask", lambda p, default="": "1")  # 选脱机一键
     monkeypatch.setattr(menu, "pause", lambda m="": None)
     monkeypatch.setattr(menu, "_ensure_root_manager", lambda mon: menu._ABORT)
 
@@ -311,3 +312,60 @@ def test_menu_root_aborts_without_running_cmd_root(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "已取消" in out
     assert called["root"] is False
+
+
+def test_install_minus99_hints_unlock_screen(monkeypatch):
+    """安装失败 -99 时，提示应引导『点亮/解锁屏幕』（熄屏是常见真因），而非归咎命令。"""
+    import lrom.device.discover as disc
+    import lrom.device.runner as runner_mod
+
+    monkeypatch.setattr(
+        disc, "detect",
+        lambda adb_server_port=None: SimpleNamespace(mode=disc.DeviceMode.ADB, serial="S1"),
+    )
+
+    class _Fail99:
+        serial = ""
+
+        def run(self, *a, timeout=None):
+            if a and a[0] == "install":
+                return SimpleNamespace(exit_code=1, stdout="", stderr="Failure [-99]")
+            return SimpleNamespace(exit_code=0, stdout="", stderr="")  # wake/unlock 等
+
+    monkeypatch.setattr(runner_mod, "AdbRunner", lambda server_port=None: _Fail99())
+    apk = Path("/tmp/m99.apk"); apk.write_bytes(b"x")
+    try:
+        status, detail = install_manager_apk(apk)
+        assert status == "failed"
+        assert "解锁" in detail or "熄屏" in detail
+    finally:
+        apk.unlink()
+
+
+def test_install_wakes_screen_before_install(monkeypatch):
+    """安装前应尝试唤醒屏幕 + 解除锁屏。"""
+    import lrom.device.discover as disc
+    import lrom.device.runner as runner_mod
+
+    monkeypatch.setattr(
+        disc, "detect",
+        lambda adb_server_port=None: SimpleNamespace(mode=disc.DeviceMode.ADB, serial="S1"),
+    )
+    calls = []
+
+    class _Cap:
+        serial = ""
+
+        def run(self, *a, timeout=None):
+            calls.append(a)
+            return SimpleNamespace(exit_code=0, stdout="Success", stderr="")
+
+    monkeypatch.setattr(runner_mod, "AdbRunner", lambda server_port=None: _Cap())
+    apk = Path("/tmp/wk.apk"); apk.write_bytes(b"x")
+    try:
+        install_manager_apk(apk)
+        flat = " ".join(" ".join(map(str, c)) for c in calls)
+        assert "KEYCODE_WAKEUP" in flat
+        assert "dismiss-keyguard" in flat
+    finally:
+        apk.unlink()

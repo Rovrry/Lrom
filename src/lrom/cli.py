@@ -192,6 +192,19 @@ def build_parser() -> argparse.ArgumentParser:
     pb.add_argument("--adb-port", type=int, default=None, help="adb server 端口")
     pb.set_defaults(func=cmd_backup)
 
+    pf = sub.add_parser("fulldump", help="字库备份（全分区 + GPT + RawProgram XML，需 root）")
+    pf.add_argument("-o", "--output", default="backups", help="输出根目录（默认 backups/）")
+    pf.add_argument(
+        "--include-super", action="store_true",
+        help="包含 super（9GB+，默认排除；系统分区可由官方包重刷）",
+    )
+    pf.add_argument(
+        "--exclude", nargs="+", default=None,
+        help="额外排除的分区名（默认已排除 userdata/cache/super）",
+    )
+    pf.add_argument("--adb-port", type=int, default=None)
+    pf.set_defaults(func=cmd_fulldump)
+
     pp = sub.add_parser("plan", help="生成刷写计划（不写设备）")
     pp.add_argument("package", type=Path, help="ROM 包路径")
     pp.add_argument("-o", "--output", type=Path, default=None, help="保存计划为 JSON")
@@ -305,9 +318,21 @@ def build_parser() -> argparse.ArgumentParser:
     )
     pr.add_argument(
         "--method",
-        choices=["ksud", "app"],
-        default="ksud",
-        help="patch 方式：ksud（全自动，推荐）或 app（用手机上的 Manager 修补）",
+        choices=["offline", "ksud", "app"],
+        default="offline",
+        help="patch 方式：offline（脱机一键，自动取 ksud 引擎，推荐）、"
+        "ksud（需本地已装 ksud）、app（用手机上的 Manager 修补）",
+    )
+    pr.add_argument(
+        "--ksud",
+        default=None,
+        help="自定义 ksud 引擎路径（offline 方式下可选）",
+    )
+    pr.add_argument(
+        "--engine",
+        choices=["ksu", "ksu-next"],
+        default="ksu",
+        help="脱机 patch 引擎（offline 方式）：ksu（KernelSU 官方）或 ksu-next（KernelSU-Next）",
     )
     pr.add_argument(
         "--partition",
@@ -423,10 +448,18 @@ def cmd_backup(args: argparse.Namespace) -> int:
     adb = AdbRunner(server_port=args.adb_port)
     adb.serial = dev.serial
 
-    if not bk.has_root(adb):
-        print(paint("未检测到 root。请给 adb shell 授予 root 权限后重试。", C.RED))
+    root_prefix = bk.detect_root_prefix(adb)
+    if root_prefix is None:
+        print(paint("✗ 未检测到 root，无法备份。", C.RED + C.BOLD))
+        print()
+        print("  备份需要读取 /dev/block/by-name/*（需 uid=0）。普通 adb shell 是")
+        print("  普通用户，读不到。请在 root 管理器里【给 shell 授予 root 权限】：")
+        print("    · Magisk / KernelSU / SukiSU / APatch → 超级用户 → 授权「Shell」")
+        print("    · 授权后重试本命令；可用 `adb shell su -c id` 自检是否 uid=0")
+        print()
+        print("  说明：fastboot fetch 一加机型基本不支持，不能作为替代方案。")
         return 1
-    print(paint("✓ root 权限可用", C.GREEN))
+    print(paint(f"✓ root 权限可用（{root_prefix}）", C.GREEN))
 
     from .core.backup import DEFAULT_BACKUP_PARTITIONS
 
@@ -457,14 +490,14 @@ def cmd_backup(args: argparse.Namespace) -> int:
     for part in parts:
         print(f"  {part:<18}", end="", flush=True)
         result = bk.backup_partition_adb(
-            adb, part, out_dir / f"{part}.img", slot=dev.slot
+            adb, part, out_dir / f"{part}.img", slot=dev.slot, root_prefix=root_prefix
         )
         session.results.append(result)
         if result.ok:
             print(paint(f"✓ {result.size_mb:>8,.1f} MB", C.GREEN))
-        elif part in bk.OPTIONAL_PARTITIONS:
-            # 部分机型没有这个分区（例如某些版本没有 fsg），不算失败
-            print(paint(f"· 跳过（本机可能无此分区）", C.DIM))
+        elif result.missing or part in bk.OPTIONAL_PARTITIONS:
+            # 不同机型的分区集合不同（如某些机型无 fsg/fsc），跳过不算失败
+            print(paint(f"· 跳过（本机无此分区）", C.DIM))
         else:
             print(paint(f"✗ {result.error}", C.RED))
 
@@ -472,14 +505,27 @@ def cmd_backup(args: argparse.Namespace) -> int:
     print()
     print(f"  清单: {manifest}")
 
+    # 只保留最新一份备份：删掉 backups/ 下其它备份会话
+    try:
+        removed = bk.prune_other_backups(out_dir, Path(args.output))
+        if removed:
+            print(paint(f"  已清理 {len(removed)} 个旧备份（只保留本次）", C.DIM))
+    except Exception:  # noqa: BLE001
+        pass
+
     ok_parts = [r for r in session.results if r.ok]
-    failed_critical = [r for r in session.results if not r.ok and r.partition in critical]
+    skipped = [r for r in session.results if r.missing]
+    failed_critical = [
+        r for r in session.results
+        if not r.ok and not r.missing and r.partition in critical
+    ]
 
     print()
     if not failed_critical:
+        extra = f"，跳过 {len(skipped)} 个（本机无）" if skipped else ""
         print(
             paint(
-                f"✓ 备份完成（{len(ok_parts)} 个分区）",
+                f"✓ 备份完成（{len(ok_parts)} 个分区{extra}）",
                 C.GREEN + C.BOLD,
             )
         )
@@ -508,6 +554,97 @@ def cmd_backup(args: argparse.Namespace) -> int:
     for r in failed_critical:
         print(f"    · {r.partition}: {r.error}")
     return 1
+
+
+def cmd_fulldump(args: argparse.Namespace) -> int:
+    """字库备份：全分区回读 + 主/备 GPT + RawProgram XML（需 ADB + shell root）。"""
+    from .core import fulldump as fd
+    from .device.discover import DeviceMode, detect
+    from .device.runner import AdbRunner
+
+    dev = detect()
+    if not dev:
+        print(paint("未检测到设备", C.RED))
+        return 1
+    if dev.mode is not DeviceMode.ADB:
+        print(paint(f"设备当前在 {dev.mode.value}，字库备份需要 ADB（开机）模式", C.RED))
+        print("  说明：紫罗兰官方也明确「回读分区/字库备份不能在 Fastboot 模式使用」。")
+        return 1
+
+    adb = AdbRunner(server_port=args.adb_port)
+    adb.serial = dev.serial
+    from .core import backup as bk
+
+    root_prefix = bk.detect_root_prefix(adb)
+    if root_prefix is None:
+        print(paint("✗ 未检测到 root，无法做字库备份。", C.RED + C.BOLD))
+        print()
+        print("  读取 /dev/block 需要 uid=0。请在 root 管理器里【给 shell 授予 root 权限】：")
+        print("    · Magisk / KernelSU / SukiSU / APatch → 超级用户 → 授权「Shell」")
+        print("    · 自检：adb shell su -c id 应返回 uid=0")
+        return 1
+    print(paint(f"✓ root 权限可用（{root_prefix}）", C.GREEN))
+
+    exclude = set(fd.DEFAULT_EXCLUDE)
+    if args.include_super:
+        exclude.discard("super")
+    if args.exclude:
+        exclude |= set(args.exclude)
+    exclude = frozenset(exclude)
+
+    out_root = Path(args.output)
+    out_dir = out_root / f"{dev.codename or 'unknown'}_fulldump_{_stamp()}"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    print()
+    print(paint(f"字库备份到: {out_dir}", C.BOLD))
+    print(f"  排除分区: {', '.join(sorted(exclude)) or '（无）'}")
+    print()
+
+    def on_result(name: str, ok: bool, detail: str) -> None:
+        mark = paint("✓", C.GREEN) if ok else paint("✗", C.RED)
+        print(f"  {name:<24} {mark} {detail}")
+
+    try:
+        res = fd.full_dump(
+            adb, out_dir, root_prefix=root_prefix, exclude=exclude,
+            on_result=on_result, on_notice=lambda m: print(paint(f"  {m}", C.DIM)),
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(paint(f"✗ 字库备份失败：{exc}", C.RED))
+        return 1
+
+    print()
+    for w in res.warnings:
+        print(paint(f"  ⚠ {w}", C.YELLOW))
+    print()
+    print(f"  已回读 : {len(res.dumped)} 个分区")
+    if res.skipped:
+        print(f"  已排除 : {len(res.skipped)} 个（{' '.join(res.skipped[:6])}…）")
+    if res.failed:
+        print(paint(f"  失败   : {len(res.failed)} 个", C.RED))
+        for name, err in list(res.failed.items())[:5]:
+            print(f"    · {name}: {err}")
+    if res.gpt_files:
+        print(f"  GPT    : {', '.join(p.name for p in res.gpt_files)}")
+    if res.xml_files:
+        print(f"  刷写脚本: {', '.join(p.name for p in res.xml_files)}")
+    print(f"  清单   : {out_dir / 'disk_info.json'}")
+    print()
+
+    if res.ok:
+        print(paint("✓ 字库备份完成", C.GREEN + C.BOLD))
+        print("  说明：RawProgram XML 为 EDL/编程器刷写脚本；LUN 编号按 sd 字母顺序推定，")
+        print("        实际刷写前务必核对（不同机型 LUN 编号可能不同）。")
+        return 0
+    print(paint("✗ 字库备份未完整完成", C.RED + C.BOLD))
+    return 1
+
+
+def _stamp() -> str:
+    from datetime import datetime
+
+    return datetime.now().strftime("%Y%m%d-%H%M%S")
 
 
 def cmd_plan(args: argparse.Namespace) -> int:
@@ -694,8 +831,22 @@ def cmd_unpack(args: argparse.Namespace) -> int:
     elapsed = _time.time() - started
 
     index = write_index(results, out_dir)
+
     ok = [r for r in results if r.ok]
     bad = [r for r in results if not r.ok]
+
+    # 只保留最新一份解包产物：**仅在本次全部成功时**才清理旧解包目录，
+    # 避免解包失败时把上一次可用的产物删掉（数据丢失）。
+    if results and not bad:
+        try:
+            from .core.unpack import prune_other_unpacked
+
+            bases = [Path("work"), Path("unpacked")]
+            if out_dir.parent not in bases:
+                bases.append(out_dir.parent)
+            prune_other_unpacked(out_dir, bases)
+        except Exception:  # noqa: BLE001
+            pass
 
     print()
     print(f"  索引: {index}")
@@ -1879,7 +2030,7 @@ def cmd_root(args: argparse.Namespace) -> int:
         from .tui.menu import confirm
 
         if not confirm(
-            f"确认 patch 并刷入 {plan.partition}？（原厂镜像会先备份）"
+            f"确认 patch 并刷入 {plan.partition}？（会先记录原厂镜像指纹，可回滚）"
         ):
             print("\n  已取消。\n")
             return 0
@@ -1887,9 +2038,13 @@ def cmd_root(args: argparse.Namespace) -> int:
     workdir = Path(args.workdir)
     workdir.mkdir(parents=True, exist_ok=True)
 
-    # --- 步骤 1：先留存原厂底图（回滚基础，必须在任何写操作之前）---
+    # --- 步骤 1：记录原厂底图指纹（回滚基础，必须在任何写操作之前）---
+    # 若源镜像本身就是「解包出来的原厂镜像」（解包目录带 unpacked.json），
+    # 则不再重复复制一份（冗余）；只记录路径+sha256+机型版本。
+    # 只有用户用 -i 指定了外部镜像时，才复制一份独立副本。
+    is_unpacked_stock = (image.parent / "unpacked.json").exists()
     print()
-    print(paint("  [1/5] 留存原厂镜像…", C.CYAN))
+    print(paint("  [1/5] 记录原厂镜像指纹…" if is_unpacked_stock else "  [1/5] 留存原厂镜像…", C.CYAN))
     try:
         stock_copy = rt.save_stock_image(
             image,
@@ -1900,13 +2055,16 @@ def cmd_root(args: argparse.Namespace) -> int:
             device_build_id=getattr(device, "build_id", None),
             source_package=str(image),
             source_version=getattr(device, "build_id", None),
+            copy_file=not is_unpacked_stock,
         )
     except OSError as exc:
-        print(paint(f"  ⛔ 保存原厂镜像失败：{exc}", C.RED))
-        print("  为安全起见已中止（没有底图就不刷写）。")
+        print(paint(f"  ⛔ 记录原厂镜像失败：{exc}", C.RED))
+        print("  为安全起见已中止（没有底图指纹就不刷写）。")
         print()
         return 1
     print(f"        {stock_copy}")
+    if is_unpacked_stock:
+        print("        （源即解包出的原厂镜像，未重复复制；回滚时直接用该镜像）")
     print(f"        sha256 {plan.stock_sha256[:32]}…")
 
     # --- 步骤 2：patch ---
@@ -1923,6 +2081,35 @@ def cmd_root(args: argparse.Namespace) -> int:
             kmi=plan.kmi,
             on_line=lambda s: None,
         )
+        if not result.ok:
+            print(paint(f"  ⛔ {result.message}", C.RED))
+            print()
+            return 1
+        patched = result.output
+        print(f"        产出 {patched}")
+    elif method is rt.RootMethod.OFFLINE:
+        # 脱机一键：自动获取 ksud 引擎（ksud 内置 LKM），PC 侧 patch
+        from .core.offline_root import ensure_engine, offline_patch
+
+        engine_key = getattr(args, "engine", None) or "ksu"
+        print(paint(f"  [2/5] 脱机 patch（引擎 {engine_key}，自动获取 ksud）…", C.CYAN))
+        try:
+            eng = ensure_engine(
+                workdir / "engine",
+                kmi=plan.kmi,
+                engine=engine_key,
+                ksud_path=getattr(args, "ksud", None),
+                allow_download=True,
+                on_notice=lambda m: print(f"        {m}"),
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(paint(f"  ⛔ 获取 patch 引擎失败：{exc}", C.RED))
+            print()
+            return 1
+        for w in eng.warnings:
+            print(paint(f"        ⚠ {w}", C.YELLOW))
+        out = workdir / f"{plan.partition}-patched-{time_str()}.img"
+        result = offline_patch(image, out, kmi=plan.kmi, engine=eng, on_line=lambda s: None)
         if not result.ok:
             print(paint(f"  ⛔ {result.message}", C.RED))
             print()

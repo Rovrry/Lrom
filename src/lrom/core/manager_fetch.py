@@ -481,9 +481,85 @@ def install_manager_apk(
 
     adb = AdbRunner(server_port=adb_server_port)
     adb.serial = dev.serial
-    # -r 覆盖安装；-d 允许降级（用户可能换回旧版）
-    res = adb.run("install", "-r", "-d", str(apk_path), timeout=300)
-    if res.exit_code != 0 or "Failure" in (res.stdout + res.stderr):
-        out = (res.stderr or res.stdout or "").strip()
-        return ("failed", out or f"adb install 退出码 {res.exit_code}")
-    return ("installed", (res.stdout or "").strip())
+
+    # 国产 ROM（OPPO/ColorOS 等）安装第三方 APK 会弹「安全确认」框（"继续安装/
+    # 取消"），adb install 会一直等这个点击 —— 不点就卡住/超时（常见 -99）。
+    # 因此：唤醒解锁屏幕 → 提示用户去点「继续安装」→ 有界超时安装 → 装后校验。
+    try:
+        _wake_and_unlock(adb)
+    except Exception:  # noqa: BLE001
+        pass
+    if on_line:
+        on_line(
+            "请查看手机屏幕：若弹出『继续安装 / 取消』确认框，请点『继续安装』"
+            "（OPPO/ColorOS 等系统会强制确认，Lrom 无法代点）。"
+        )
+
+    res = adb.run("install", "-r", "-d", str(apk_path), timeout=180)
+    out = (res.stdout + res.stderr).strip()
+
+    # 以「设备上是否真的出现该包」为准（adb install 的退出码/输出在等待确认时不可靠）
+    pkg = _apk_package_name(apk_path)
+    installed = _is_pkg_installed(adb, pkg) if pkg else False
+    if installed:
+        return ("installed", out or "Success")
+
+    if res.exit_code == 0 and "Failure" not in out:
+        # 命令报成功但包没出现（可能仍在等确认），再查一次
+        if pkg is None:
+            return ("installed", out or "Success")
+
+    # 失败：给出可执行的手动方案，并把 APK 推到手机上方便用户点开安装
+    remote = _push_apk_for_manual(adb, apk_path)
+    hint = (
+        "\n  自动安装未成功（常见原因：系统安装确认框未被点击 / 熄屏 -99）。\n"
+        "  处理办法：\n"
+        "    1) 点亮并解锁屏幕后重试本步骤，看到『继续安装』就点它；\n"
+        f"    2) 或手动安装：adb install -r \"{apk_path}\"\n"
+    )
+    if remote:
+        hint += f"    3) 已把 APK 推到手机 {remote}，用文件管理器点开安装即可。\n"
+    return ("failed", (out or f"adb install 退出码 {res.exit_code}") + hint)
+
+
+def _apk_package_name(apk_path: Path) -> str | None:
+    """用 aapt 读 APK 包名（aapt 不可用时返回 None，不强依赖）。"""
+    try:
+        from .tools import find_tool
+        from ..device.runner import run
+
+        aapt = find_tool("aapt") or find_tool("aapt2")
+    except Exception:  # noqa: BLE001
+        return None
+    try:
+        res = run([aapt, "dump", "badging", str(apk_path)], timeout=30)
+        m = re.search(r"package: name='([^']+)'", res.combined)
+        return m.group(1) if m else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _is_pkg_installed(adb, pkg: str) -> bool:
+    try:
+        res = adb.run("shell", "pm", "list", "packages", pkg, timeout=20)
+        return f"package:{pkg}" in (res.stdout + res.stderr)
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _push_apk_for_manual(adb, apk_path: Path) -> str | None:
+    """把 APK 推到设备 Download 目录，便于用户手动点开安装。"""
+    try:
+        remote = f"/sdcard/Download/{apk_path.name}"
+        res = adb.run("push", str(apk_path), remote, timeout=120)
+        if res.exit_code == 0:
+            return remote
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
+def _wake_and_unlock(adb) -> None:
+    """尽力唤醒并解除锁屏（无密码时），避免熄屏导致 installd 拒绝安装。"""
+    adb.run("shell", "input", "keyevent", "KEYCODE_WAKEUP", timeout=10)
+    adb.run("shell", "wm", "dismiss-keyguard", timeout=10)

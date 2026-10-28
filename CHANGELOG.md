@@ -2,6 +2,75 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.8.0] - 2026-10-29
+
+正式版。本轮新增**字库备份**、**脱机 Root**，并优化备份/解包/回滚/线刷交互。
+**全部在真机 OPD2404（一加平板 Pro / A16 / 槽 b / BL 已解锁）上验证。**
+
+### 新增：字库备份（`lrom fulldump` / 菜单 5 第 2 项）
+
+对齐紫罗兰「备份字库」的做法（官方：备份设备分区 + 主/备 GPT + RawProgram XML，
+且必须在 **ADB + shell root** 下做，Fastboot 模式不可用）。
+
+- 全分区回读（默认排除 userdata / cache / super，可 `--include-super`）
+- 主/备 GPT 导出（`.bin`），读不到时如实告警
+- 生成 `rawprogramN.xml`（EDL/编程器刷写脚本）+ `disk_info.json` 清单
+- **4K 逻辑扇区支持**：本机 `logical_block_size=4096`，GPT 头在偏移 4096；
+  sysfs 的 start/size（512 单位）会换算成设备 LBA，XML 用 `SECTOR_SIZE_IN_BYTES=4096`
+- 真机实测：133 个分区 / 4.8 GB / 12 个 GPT（6 LUN × 主备）/ 6 个 XML，全部校验通过
+
+### 新增：脱机 Root（`lrom root --method offline` / 菜单 7 选 1）
+
+PC 侧 patch init_boot，用户只需装管理器 APK。
+
+- 自动获取 ksud 引擎（KernelSU / KernelSU-Next 官方 Release，x86_64 musl）
+- **ksud 已内置各 KMI 内核模块**，无需单独下载 LKM；KMI 自动转成 ksud 格式
+  （`6.1-android14-11` → `android14-6.1`）
+- 支持多引擎：`ksu`（KernelSU）/ `ksu-next`（KernelSU-Next）
+- 明确不支持脱机一键的：SukiSU（官方无 PC host ksud）、Magisk/APatch（走 APP 或高危）
+- 真机验证：patch → 刷入 → 开机 → KernelSU「工作中（LKM）」成功
+
+### 修复
+
+- **`patch_with_ksud` 的 `-o` 必须是目录**（传文件路径会 `write out new boot failed`），
+  并支持 `--module`（LKM）；此前该路径实际不可用
+- **管理器 APK 安装**：国产 ROM（OPPO/ColorOS）会弹「继续安装」确认框，`adb install`
+  会卡住（-99）。改为：安装前唤醒/解锁屏幕 + 明确提示用户点确认 + 有界超时 +
+  装后 `pm list packages` 校验 + 失败时把 APK 推到 Download 供手动安装
+- **解包/备份「只保留最新一份」的清理逻辑**：原先可能在解包失败时删掉旧产物
+  （数据丢失）。现改为**仅当本次全部成功、且新目录确有产物时才清理**
+- `save_stock_image`：源就是解包出的原厂镜像时**不再重复复制**，只记录指纹
+  （路径 + sha256 + 机型版本）
+
+### 改进
+
+- **备份清单 12 → 33 个分区**：补齐 IMEI/基带/校准/回锁/BL 链关键分区
+  （modemst1/2、**nonmodemst1/2**（欧加命名，本机实测）、fsg、fsc、preisp_*、
+  apdp*、rtice、rticmpdata、secdata、storsec、oplusreserve1、oplusstanvbk、
+  xbl、xbl_config、abl、frp）
+- 备份**节点自动探测**（带槽/裸名都试）、**缺失分区自动跳过**、
+  **root 前缀自动探测**（`su -c` / `ksu -c` / `ksud su -c`）
+- **回滚 Root** 不再让用户从备份列表挑选：默认用**解包出来的 init_boot**，
+  并做**版本对比**（不一致红字告警）；解包镜像不在时才回退到记录/副本
+- **线刷前可选备份**：新增「是否备份关键分区」提示（非强制）
+- 菜单重排：「仅FBD救砖」并入线刷（菜单 3 第 4 模式）；「修复FastbootD」移到工具区（菜单 13）
+- 诊断（菜单 17）增强：内测/Beta 版多 prop 只读判定、ARB 只读预检、FBD 可达实测 `probe_fbd`
+- `recovery` 归入 WARN 分区（此前会当 SAFE 静默刷）
+- ARB 读取失败时明确提示「在 root 管理器给 shell 授权」
+
+### 测试
+
+- 393 → **471**，全绿。新增：`test_offline_root.py`、`test_fulldump.py`、
+  `test_backup_partitions.py`、`test_cleanup_and_rollback.py`。
+
+### 真机验证记录（OPD2404）
+
+- 备份：16 个分区成功 / 5 个本机无（跳过），0.71 GB
+- 字库备份：133 分区 / 4.8 GB / 12 GPT / 6 XML
+- 脱机 Root：KernelSU「工作中（LKM）」
+- 仅FBD 线刷：15 个逻辑分区全部成功（273.7 秒）
+- 修复FastbootD：probe 识别 FBD 健康 → 不误刷
+
 ## [0.7.9] - 2026-10-28
 
 正式版，包含 0.7.9-rc1/rc2 全部内容（FastbootD 救砖分流诊断、仅FBD/修复FBD、

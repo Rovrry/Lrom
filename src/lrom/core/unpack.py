@@ -247,3 +247,48 @@ def write_index(results: list[ExtractResult], out_dir: Path) -> Path:
         encoding="utf-8",
     )
     return path
+
+
+# ---------------------------------------------------------------------------
+# 解包产物清理：只保留最新一份
+# ---------------------------------------------------------------------------
+
+def prune_other_unpacked(keep: Path, bases: list[Path]) -> list[Path]:
+    """删除除 keep 以外的其它「解包产物目录」，让本地只保留最新一份。
+
+    安全前提（很重要，否则会误删用户数据）：
+      · **只有 keep 目录真实存在且含有 *.img 时才动手**；否则一律不删。
+        （解包失败 / keep 还没生成时删旧目录 = 数据丢失）
+      · 只删「目录里有 unpacked.json 标记」的目录，绝不碰其它目录。
+
+    返回被删除的目录列表。
+    """
+    import shutil
+
+    try:
+        if not keep.is_dir() or not any(keep.glob("*.img")):
+            return []
+    except OSError:
+        return []
+
+    keep_resolved = keep.resolve()
+    removed: list[Path] = []
+    for base in bases:
+        try:
+            if not base.is_dir():
+                continue
+        except OSError:
+            continue
+        for child in base.iterdir():
+            try:
+                if not child.is_dir():
+                    continue
+                if child.resolve() == keep_resolved:
+                    continue
+                if not (child / "unpacked.json").exists():
+                    continue
+                shutil.rmtree(child)
+                removed.append(child)
+            except OSError:
+                continue
+    return removed

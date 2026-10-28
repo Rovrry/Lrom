@@ -877,8 +877,22 @@ def _flow_unpack(sess: Session, mon) -> None:
     write_index(results, out)
 
     ok = sum(1 for r in results if r.ok)
+    all_ok = bool(results) and ok == len(results)
+
+    # 只保留最新一份解包产物：**仅在本次全部成功时**才清理旧目录，
+    # 避免解包失败时把上一次可用的产物删掉（数据丢失）。
+    if all_ok:
+        try:
+            from ..core.unpack import prune_other_unpacked
+
+            removed = prune_other_unpacked(out, [sess.work_dir, Path("unpacked")])
+            if removed:
+                print(_color(f"  已清理 {len(removed)} 个旧的解包目录（只保留本次）", C.DIM))
+        except Exception:  # noqa: BLE001
+            pass
+
     print()
-    if results and ok == len(results):
+    if all_ok:
         print(_color(f"  ✓ 解包完成：{ok} 个分区", C.GREEN + C.BOLD))
     else:
         print(_color(f"  完成 {ok}/{len(results)}", C.RED))
@@ -1072,6 +1086,25 @@ def _flow_flash(
     if ans.strip().lower() in ("y", "yes", "是"):
         ns.wipe = True
 
+    # 刷写前「是否备份分区」——可选、非强制。备份需要 root + ADB 模式。
+    print()
+    bk_ans = ask(
+        "刷写前是否备份关键分区？（需 root、设备需在系统/ADB 模式；建议但非强制，直接回车=不备份）",
+        "n",
+    ).strip().lower()
+    if bk_ans in ("y", "yes", "是"):
+        import argparse as _argparse
+
+        from ..cli import cmd_backup as _cmd_backup
+
+        print()
+        print(_color("  开始备份关键分区…（若设备不在 ADB 模式或未 root 会失败，可跳过继续）", C.DIM))
+        try:
+            _cmd_backup(_argparse.Namespace(partitions=None, output="backups", adb_port=None))
+        except Exception as exc:  # noqa: BLE001
+            print(_color(f"  ! 备份未完成：{exc}（可继续刷写）", C.YELLOW))
+        print()
+
     # 打印本模式的关键差异，避免用户误判（尤其回锁线刷会切槽）
     print()
     print(f"  {_color('已选模式：', C.BOLD)}{mode.label}")
@@ -1096,7 +1129,48 @@ def _flow_flash(
 
 
 def _menu_backup(sess: Session, mon) -> None:
+    """菜单 5：备份设备分区。
+
+    两种模式：
+      1) 关键分区备份（精简）：只备不可再生的身份/基带/回锁/BL 链分区
+      2) 字库备份（全量）：全分区回读 + 主/备 GPT + RawProgram XML（对齐紫罗兰）
+    两者都需要 ADB 开机模式 + shell root。
+    """
     import argparse
+
+    print()
+    print(f"  {_color('备份设备分区', C.BOLD)}")
+    print()
+    print(f"    {_color('1', C.CYAN)}) 关键分区备份（精简，推荐先做）")
+    print(_color("       只备不可再生的：persist / modemst / fsg / ocdt / oplusreserve 等", C.DIM))
+    print(f"    {_color('2', C.CYAN)}) 字库备份（全量）")
+    print(_color("       全分区回读 + 主/备 GPT + RawProgram XML；占空间大（默认排除 userdata/super）", C.DIM))
+    print(f"    {_color('0', C.CYAN)}) 返回")
+    print()
+    pick = ask("请选择", "1").strip().lower()
+    if pick in ("0", "q", "quit", "exit"):
+        print(f"  {_color('已取消', C.DIM)}")
+        pause()
+        return
+
+    if pick == "2":
+        from ..cli import cmd_fulldump
+
+        print()
+        print(_color("  字库备份会回读所有分区（排除 userdata/cache/super），需要较大磁盘空间。", C.YELLOW))
+        inc = ask("是否包含 super（9GB+，系统分区可由官方包重刷）？（y/N）", "n").strip().lower()
+        rc = cmd_fulldump(
+            argparse.Namespace(
+                output="backups",
+                include_super=inc in ("y", "yes", "是"),
+                exclude=None,
+                adb_port=None,
+            )
+        )
+        if rc != 0:
+            print(f"  {_color('字库备份未完整完成。', C.YELLOW)}")
+        pause()
+        return
 
     from ..cli import cmd_backup
 
@@ -1715,7 +1789,20 @@ def _menu_root(sess: "Session", mon) -> None:
         return
     print()
 
-    # ---- 根管理器 APK（内置下载）----
+    # ---- 选择 patch 方式 ----
+    print(f"  {_color('选择 Root 方式：', C.BOLD)}")
+    print(f"    {_color('1', C.CYAN)}) 脱机一键（推荐）  PC 自动 patch，最后只需装管理器 APK")
+    print(f"    {_color('2', C.CYAN)}) APP 手动         推镜像到手机，用管理器手动修补")
+    print(f"    {_color('0', C.CYAN)}) 返回")
+    pick = ask("请选择", "1").strip()
+    if pick in ("0", "q", "quit", "exit"):
+        print(f"  {_color('已取消，返回主菜单', C.DIM)}")
+        pause()
+        return
+    method = "app" if pick == "2" else "offline"
+    print()
+
+    # ---- 根管理器 APK（内置下载；APP 方式同样需要管理器）----
     mgr = _ensure_root_manager(mon)
     if mgr is _ABORT:
         print(f"  {_color('已取消，返回主菜单', C.DIM)}")
@@ -1725,14 +1812,25 @@ def _menu_root(sess: "Session", mon) -> None:
 
     print(f"  {_color('提示', C.BOLD)}：")
     print("    · 刷写前会把原厂镜像备份到 root-work/，可随时回滚")
-    print("    · APP 方式：按提示在管理器里选择刚推送的镜像进行修补")
+    if method == "offline":
+        print("    · 脱机一键：PC 自动下载 ksud 引擎并 patch init_boot，最后装管理器即 Root")
+    else:
+        print("    · APP 方式：按提示在管理器里选择刚推送的镜像进行修补")
     print("    · Lrom 不会自动重启设备")
+    print()
+
+    # 若选的是不支持脱机一键的管理器（SukiSU/APatch/Magisk），降级为 APP 手动方式
+    offline_engines = {"ksu", "ksu-next"}
+    engine_key = _LAST_MANAGER_KEY if _LAST_MANAGER_KEY in offline_engines else "ksu"
+    if method == "offline" and _LAST_MANAGER_KEY and _LAST_MANAGER_KEY not in offline_engines:
+        print(_color(f"  注意：{_LAST_MANAGER_KEY} 不支持脱机一键 patch，已改为 APP 手动方式。", C.YELLOW))
+        method = "app"
     print()
 
     rc = cmd_root(
         argparse.Namespace(
             image=image,
-            method="app",
+            method=method,
             partition=None,
             flash_mode=None,
             kmi=None,
@@ -1740,6 +1838,8 @@ def _menu_root(sess: "Session", mon) -> None:
             yes=False,
             workdir="root-work",
             adb_port=None,
+            ksud=None,
+            engine=engine_key,
         )
     )
     if rc != 0:
@@ -1750,6 +1850,10 @@ def _menu_root(sess: "Session", mon) -> None:
 
 #: 用户在交互中选择「退出整个流程」时返回的哨兵值
 _ABORT = object()
+
+#: _ensure_root_manager 最近一次选中的管理器 key（ksu / ksu-next / sukisu / apatch），
+#: 供 _menu_root 决定脱机 patch 引擎。
+_LAST_MANAGER_KEY: str | None = None
 
 
 def _ensure_root_manager(mon) -> Path | None:
@@ -1819,6 +1923,8 @@ def _ensure_root_manager(mon) -> Path | None:
     except (ValueError, IndexError):
         print(f"  {_color('无效选择，跳过', C.YELLOW)}")
         return None
+    global _LAST_MANAGER_KEY
+    _LAST_MANAGER_KEY = key
 
     print()
     print(f"  {_color('渠道', C.BOLD)}：")
@@ -1931,59 +2037,107 @@ def _menu_fetch_manager(sess: "Session", mon) -> None:
 
 
 def _menu_root_rollback(sess: "Session", mon) -> None:
-    """菜单 9：回滚 Root（刷回原厂 init_boot）。"""
+    """菜单 9：回滚 Root（刷回原厂 init_boot）。
+
+    默认直接使用「解包出来的 init_boot.img」（版本最可靠），不再让用户在多个
+    备份里挑选。做版本对比：若解包镜像的版本与设备当前系统不一致，红字告警
+    （刷入不匹配的 init_boot 可能无法开机）。
+    解包镜像不存在时，才回退到 root-work/ 里最近一次的原厂备份。
+    """
     from pathlib import Path
 
     print()
     print(f"  {_color('回滚 Root', C.BOLD)}")
     print()
 
-    workdir = Path("root-work")
-    backups = sorted(workdir.glob("init_boot-stock-*.img")) if workdir.is_dir() else []
-
-    if not backups:
-        print(f"  {_color('root-work/ 里没有找到原厂备份。', C.YELLOW)}")
-        print()
-        print("  可以改用全量包里解出的原厂镜像：")
-        print(f"    {_color('fastboot flash init_boot unpacked/rom/init_boot.img', C.CYAN)}")
-        pause()
-        return
-
-    print("  找到以下原厂备份：")
-    for i, p in enumerate(backups, 1):
-        size_mb = p.stat().st_size / 1024 / 1024
-        # 读取备份元数据里记录的机型，便于核对
-        meta_tag = ""
-        meta_file = p.with_suffix(".json")
-        if meta_file.exists():
-            try:
-                import json
-
-                meta = json.loads(meta_file.read_text(encoding="utf-8"))
-                bits = [
-                    meta.get("device_model"),
-                    meta.get("device_build_id"),
-                ]
-                bits = [b for b in bits if b]
-                if bits:
-                    meta_tag = "  " + _color("[" + " · ".join(bits) + "]", C.DIM)
-            except Exception:  # noqa: BLE001
-                pass
-        print(f"    {_color(str(i), C.CYAN)}) {p.name}  ({size_mb:.1f} MB){meta_tag}")
-    print()
-    pick = ask("请选择要刷回的镜像", "1")
+    # ---- 选目标镜像：优先解包产物，其次最近一次 root 原厂备份 ----
+    target: Path | None = None
+    source_desc = ""
+    pkg_ver = None
     try:
-        target = backups[int(pick.strip()) - 1]
-    except (ValueError, IndexError):
-        print(f"  {_color('无效选择', C.YELLOW)}")
+        if sess.unpacked:
+            cand = Path(sess.image_dir) / "init_boot.img"
+            if cand.exists():
+                target = cand
+                source_desc = "解包产物（全量包）"
+                pkg_ver = sess._package_version()
+    except Exception:  # noqa: BLE001
+        target = None
+
+    if target is None:
+        workdir = Path("root-work")
+        # 优先找独立副本（.img）；没有则读指纹记录（.json）里的 source 路径
+        backups = sorted(
+            workdir.glob("init_boot-stock-*.img"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        ) if workdir.is_dir() else []
+        metas = sorted(
+            workdir.glob("init_boot-stock-*.json"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        ) if workdir.is_dir() else []
+        if backups:
+            target = backups[0]
+            source_desc = "root-work 最近一次原厂备份"
+            meta = target.with_suffix(".json")
+            if meta.exists():
+                try:
+                    import json
+
+                    pkg_ver = json.loads(meta.read_text(encoding="utf-8")).get(
+                        "source_version"
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+        elif metas:
+            # 只记录了指纹（未复制副本）：从记录里取源镜像路径
+            import json
+
+            for meta in metas:
+                try:
+                    data = json.loads(meta.read_text(encoding="utf-8"))
+                except Exception:  # noqa: BLE001
+                    continue
+                src = data.get("source")
+                if src and Path(src).exists():
+                    target = Path(src)
+                    source_desc = "root-work 记录的源镜像（解包产物）"
+                    pkg_ver = data.get("source_version")
+                    break
+
+    if target is None:
+        print(f"  {_color('找不到可回滚的原厂 init_boot。', C.YELLOW)}")
+        print()
+        print("  请先执行菜单 1（解全量包），解出 init_boot 后再回滚；")
+        print("  或用命令行指定：")
+        print(f"    {_color('fastboot flash init_boot <原厂init_boot.img>', C.CYAN)}")
         pause()
         return
 
-    print()
-    print(f"  即将把 {_color(target.name, C.BOLD)} 刷入 init_boot 分区。")
+    print(f"  回滚镜像 : {target}   {_color('(' + source_desc + ')', C.DIM)}")
+
+    # ---- 版本对比（解包镜像 vs 设备当前系统）----
+    dev_ver = None
+    try:
+        from ..device.discover import detect
+
+        dev = detect()
+        dev_ver = getattr(dev, "build_id", None) if dev else None
+    except Exception:  # noqa: BLE001
+        dev_ver = None
+    if pkg_ver or dev_ver:
+        print(f"  镜像版本 : {pkg_ver or '未知'}")
+        print(f"  设备版本 : {dev_ver or '未知'}")
+        if pkg_ver and dev_ver and (str(pkg_ver) not in str(dev_ver)) and (
+            str(dev_ver) not in str(pkg_ver)
+        ):
+            print()
+            print(_color("  ⚠ 版本不一致：镜像与设备当前系统版本不同。", C.RED + C.BOLD))
+            print(_color("    刷入不匹配的 init_boot 可能导致无法开机。建议用与设备相同的全量包。", C.RED))
     print()
 
-    # 机型与版本核对（危险写操作之前）—— 防止把别的机型的镜像刷进来
+    # 机型与版本核对（危险写操作之前）
     snap = mon.refresh_now() if mon else None
     if not _verify_device_for_root(snap, sess, action="回滚 Root"):
         pause()
@@ -1999,7 +2153,6 @@ def _menu_root_rollback(sess: "Session", mon) -> None:
         pause()
         return
 
-    # 自动切换模式：设备可能还在 ADB，直接 flash 会空等
     from ..core.root import FlashMode, flash_patched_image
 
     print()

@@ -80,6 +80,9 @@ ROOT_PARTITION_CANDIDATES = ("init_boot", "boot")
 class RootMethod(Enum):
     KSUD = "ksud"
     APP = "app"
+    #: 脱机一键：自动获取 ksud 引擎（+匹配 KMI 的 LKM）→ PC 侧 patch → 刷入 →
+    #: 提示装管理器。用户最终只需点装 APK。
+    OFFLINE = "offline"
 
 
 class FlashMode(Enum):
@@ -350,6 +353,8 @@ def build_root_plan(
                 "     或者改用 APP 方式（不需要 ksud）：\n"
                 "       ./lrom root --method app ..."
             )
+    # OFFLINE 方式：引擎（ksud）会由 Lrom 自动从 KernelSU 官方 Release 下载，
+    # 不在这里强制要求本地已安装 ksud。
 
     # --- 6. 通用警告 ---
     plan.warnings.append(
@@ -363,6 +368,10 @@ def build_root_plan(
         plan.warnings.append(
             "APP 方式需要你在手机上手动操作一次（安装 Manager、点击修补）。"
         )
+    if method is RootMethod.OFFLINE:
+        plan.warnings.append(
+            "脱机一键会从 KernelSU 官方 Release 下载 ksud 引擎与匹配内核模块（仅 github 域名、sha256 校验）。"
+        )
 
     # --- 7. 步骤 ---
     if method is RootMethod.KSUD:
@@ -371,11 +380,23 @@ def build_root_plan(
             f"用 ksud patch 镜像：ksud boot-patch -b {image.name} "
             f"-o <输出>{kmi_hint}",
             "校验 patch 后的镜像（大小、ramdisk、AVB footer）",
-            "把原厂镜像另存一份到 root-work/（回滚用）",
+            "记录原厂镜像指纹（源即解包镜像时不重复复制；回滚时优先用解包镜像）",
             "进入 fastboot 模式",
             f"fastboot flash {plan.partition} <patch后的镜像>",
             "停下，等待你手动重启",
             "重启后验证 root（su -c id）",
+        ]
+    elif method is RootMethod.OFFLINE:
+        kmi_hint = f" --kmi {plan.kmi}" if plan.kmi else ""
+        plan.steps = [
+            "自动获取 ksud 引擎（官方 ksud 内置各 KMI 内核模块，无需另下 LKM）",
+            f"PC 侧脱机 patch：ksud boot-patch -b {image.name} --kmi <androidXX-Y>（ksud 内置 LKM，无需 -m）",
+            "校验 patch 后的镜像（大小、ramdisk、AVB footer）",
+            "记录原厂镜像指纹（源即解包镜像时不重复复制；回滚时优先用解包镜像）",
+            "进入 fastboot 模式",
+            f"fastboot flash {plan.partition} <patch后的镜像>",
+            "下载并提示安装 Root 管理器 APK（装完 Root 生效）",
+            "停下，等待你手动重启",
         ]
     else:
         plan.steps = [
@@ -383,7 +404,7 @@ def build_root_plan(
             "等你用 Manager APP 修补该文件，导出一个新镜像",
             "把修补后的镜像拉回电脑",
             "校验 patch 后的镜像",
-            "把原厂镜像另存一份到 root-work/（回滚用）",
+            "记录原厂镜像指纹（源即解包镜像时不重复复制；回滚时优先用解包镜像）",
             "进入 fastboot 模式",
             f"fastboot flash {plan.partition} <patch后的镜像>",
             "停下，等待你手动重启",
@@ -407,19 +428,33 @@ def save_stock_image(
     device_build_id: str | None = None,
     source_package: str | None = None,
     source_version: str | None = None,
+    copy_file: bool = True,
 ) -> Path:
-    """把原厂镜像另存一份，作为回滚用的底图。
+    """留存原厂镜像（回滚底图）+ 记录指纹。
+
+    当 ``copy_file=True``：把镜像复制一份到 root-work/（独立副本）。
+    当 ``copy_file=False``：**不再重复复制**（源镜像本身就是解包出来的原厂镜像，
+    复制一份是冗余），只写一份指纹记录（路径 + sha256 + 机型版本）。
+    回滚时优先用解包镜像，找不到才用这里的副本。
 
     附带记录设备机型与系统版本，回滚时可据此核对，避免把别的机型
     的镜像刷回去。
 
-    返回留存后的路径。
+    返回底图路径（copy_file=False 时返回源镜像路径）。
     """
     workdir = Path(workdir)
     workdir.mkdir(parents=True, exist_ok=True)
     stamp = time.strftime("%Y%m%d-%H%M%S")
-    dest = workdir / f"{partition}-stock-{stamp}.img"
-    shutil.copy2(image, dest)
+    if copy_file:
+        dest = workdir / f"{partition}-stock-{stamp}.img"
+        shutil.copy2(image, dest)
+        sha = _sha256(dest)
+        size = dest.stat().st_size
+    else:
+        # 不复制：记录源镜像（解包产物）即可
+        dest = Path(image)
+        sha = _sha256(Path(image))
+        size = Path(image).stat().st_size
 
     meta = {
         "tool": "lrom",
@@ -427,8 +462,9 @@ def save_stock_image(
         "created_at": stamp,
         "partition": partition,
         "source": str(image),
-        "size": dest.stat().st_size,
-        "sha256": _sha256(dest),
+        "copy_file": bool(copy_file),
+        "size": size,
+        "sha256": sha,
         # 机型与版本，供回滚时核对
         "device_model": device_model or "",
         "device_codename": device_codename or "",
@@ -453,21 +489,32 @@ def patch_with_ksud(
     output: Path,
     ksud: str | None = None,
     kmi: str | None = None,
+    module: Path | None = None,
     on_line=None,
 ) -> PatchResult:
     """用 ksud 在 PC 侧 patch 镜像。
 
     注意：不加 --flash。Lrom 自己负责刷写，
     以便复用现有的风险检查与确认流程。
+
+    module：GKI 2.0 / LKM 模式下需传入匹配 KMI 的 kernelsu.ko
+    （ksud boot-patch -m <module>），否则 patch 出的镜像不含内核模块。
     """
     try:
         binary = ksud or find_tool("ksud")
     except ToolNotFoundError as exc:
         return PatchResult(ok=False, message=str(exc))
 
-    argv = [binary, "boot-patch", "-b", str(image), "-o", str(output)]
+    # 注意：ksud boot-patch 的 -o/--out 期望的是「输出目录」而不是文件路径
+    # （不带 -o 时默认当前目录）。传文件路径会导致 Repacking 后
+    # "write out new boot failed"。这里始终把 output 的父目录作为 -o。
+    out_dir = output if output.is_dir() else output.parent
+    out_dir.mkdir(parents=True, exist_ok=True)
+    argv = [binary, "boot-patch", "-b", str(image), "-o", str(out_dir)]
     if kmi:
         argv += ["--kmi", kmi]
+    if module is not None:
+        argv += ["--module", str(module)]
 
     try:
         res = run(argv, timeout=900, on_line=on_line)
@@ -482,12 +529,25 @@ def patch_with_ksud(
             message=f"ksud 失败（退出码 {res.exit_code}）\n{res.combined.strip()}",
         )
 
-    # ksud 有时不按 -o 精确命名，尝试解析输出里的路径
+    # ksud 自己在输出目录里命名（kernelsu_patched_<时间戳>.img）。
+    # 优先用 output 指定的确切文件名（若存在），否则从 ksud 输出里解析路径。
     produced = output
     if not produced.is_file():
         m = re.search(r"(/\S+\.img)\b", res.combined)
         if m and Path(m.group(1)).is_file():
             produced = Path(m.group(1))
+    if not produced.is_file():
+        # 再兜底：在输出目录里找本次新生成的 *.img
+        try:
+            imgs = sorted(
+                (p for p in out_dir.glob("*.img") if p.is_file()),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+            if imgs:
+                produced = imgs[0]
+        except OSError:
+            pass
     if not produced.is_file():
         return PatchResult(
             ok=False,
