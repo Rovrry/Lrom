@@ -266,6 +266,20 @@ def build_parser() -> argparse.ArgumentParser:
     pl.add_argument("--adb-port", type=int, default=None, help="adb server 端口")
     pl.set_defaults(func=cmd_relock)
 
+    pu = sub.add_parser(
+        "unlock",
+        help="BL 解锁（会清空全部数据；需先开 OEM 解锁 / 通过深度测试）",
+    )
+    pu.add_argument("--dry-run", action="store_true", help="只打印计划，不写设备")
+    pu.add_argument("--yes", action="store_true", help="跳过交互确认（危险）")
+    pu.add_argument(
+        "--legacy",
+        action="store_true",
+        help="用旧命令 fastboot oem unlock（AOSP 8.0 之前设备）",
+    )
+    pu.add_argument("--adb-port", type=int, default=None, help="adb server 端口")
+    pu.set_defaults(func=cmd_unlock)
+
     pa = sub.add_parser("arb", help="ARB 熔断检测（判断降级是否会变砖）")
     pa.add_argument(
         "-i", "--images", default="unpacked/rom", help="镜像目录（默认 unpacked/rom）"
@@ -1194,6 +1208,130 @@ def _print_lock_device_prompt() -> None:
     print(paint("     选错（留在 do not lock）会取消回锁，设备保持解锁。", C.DIM))
     print("     此时 Lrom 正在等待你的确认，屏幕上不要选 do not lock。")
     print()
+
+
+def _print_unlock_device_prompt() -> None:
+    """提示用户在设备端确认解锁（bootloader 物理确认界面）。"""
+    print()
+    print(paint("  ⚠ 请立即看设备屏幕：bootloader 会弹出确认界面", C.YELLOW + C.BOLD))
+    print("     · 屏幕上会出现           Do not unlock the bootloader")
+    print("                              Unlock the bootloader")
+    print("     · 用【音量键】选到      Unlock the bootloader（第二个/下方）")
+    print("     · 按【电源键】确认")
+    print()
+    print(paint("     选错会取消解锁。此时 Lrom 正在等待你的确认。", C.DIM))
+    print()
+
+
+def cmd_unlock(args: argparse.Namespace) -> int:
+    """BL 解锁。
+
+    前提：
+      1. 开发者选项 → 打开「OEM 解锁」与「USB 调试」
+      2. 新机（ColorOS 16+）须先通过「深度测试」审核
+      3. 设备处于 fastboot 模式
+
+    解锁会清空全部用户数据。
+    """
+    from .core.unlock import (
+        UnlockReadiness,
+        build_unlock_plan,
+        check_unlock_readiness,
+    )
+    from .device.discover import DeviceMode, detect
+    from .device.runner import FastbootRunner
+
+    print()
+    print(paint("╭─ BL 解锁 " + "─" * 48, C.BOLD))
+    print()
+    print(paint("  解锁会清空全部用户数据（应用、照片、账号全部重置）。", C.RED + C.BOLD))
+    print("  解锁后设备每次开机都会显示「bootloader 已解锁」警告。")
+    print()
+    print("  解锁前请确认：")
+    print("    □ 设置 → 关于手机 → 连点版本号，已开启开发者选项")
+    print("    □ 开发者选项 → 已打开「OEM 解锁」和「USB 调试」")
+    print("    □ 新机（ColorOS 16+，如一加 15）已通过「深度测试」审核")
+    print()
+
+    dev = detect(adb_server_port=getattr(args, "adb_port", None))
+    mode_str = ""
+    if dev is not None:
+        mode_str = {
+            DeviceMode.ADB: "adb",
+            DeviceMode.FASTBOOT: "fastboot",
+            DeviceMode.FASTBOOTD: "fastbootd",
+            DeviceMode.UNAUTHORIZED: "unauthorized",
+        }.get(dev.mode, "")
+
+    readiness, reasons = check_unlock_readiness(
+        device_present=dev is not None,
+        device_mode=mode_str,
+        locked=getattr(dev, "locked", None) if dev else None,
+    )
+
+    if readiness is UnlockReadiness.NO_DEVICE:
+        print(paint("  ⛔ 未检测到设备", C.RED + C.BOLD))
+        print("     请连接设备并进入 fastboot 模式：adb reboot bootloader")
+        print()
+        return 1
+    if readiness is UnlockReadiness.NOT_FASTBOOT:
+        print(paint(f"  ⛔ 设备不在 fastboot 模式（{dev.mode.value}）", C.RED + C.BOLD))
+        print("     请执行：adb reboot bootloader")
+        print()
+        return 1
+    if readiness is UnlockReadiness.LOCK_STATE_UNKNOWN:
+        print(paint("  ⛔ 无法确认 Bootloader 锁状态", C.RED + C.BOLD))
+        print()
+        return 1
+    if readiness is UnlockReadiness.ALREADY_UNLOCKED:
+        print(paint("  ✓ 设备已是解锁状态，无需重复解锁", C.GREEN + C.BOLD))
+        print()
+        return 0
+
+    plan = build_unlock_plan(
+        device_model=dev.model or "",
+        device_codename=dev.codename or "",
+        current_slot=dev.slot or "",
+        legacy_command=getattr(args, "legacy", False),
+    )
+    print(plan.describe())
+
+    if getattr(args, "dry_run", False):
+        print(paint("  这是预演（--dry-run），不会写入任何数据。", C.YELLOW))
+        print()
+        return 0
+
+    if not getattr(args, "yes", False):
+        from .tui.menu import confirm
+
+        print(paint("  解锁会清空全部数据，且会跳过 AVB 校验（安全性下降）。", C.RED))
+        print()
+        if not confirm("确认解锁 Bootloader？（输入 UNLOCK 确认）", "UNLOCK"):
+            print("  已取消。")
+            print()
+            return 1
+
+    fb = FastbootRunner(serial=getattr(dev, "serial", None))
+    _print_unlock_device_prompt()
+    print(paint("  正在执行解锁…", C.CYAN))
+    res = fb.run(*plan.unlock_command, timeout=300)
+    if not fb.ok(res):
+        out = res.combined.strip()
+        print(paint(f"  ⛔ 解锁命令失败：{out[:300]}", C.RED + C.BOLD))
+        print()
+        print("     常见原因：")
+        print("       · 设备端选了 Do not unlock（取消了）→ 可重跑本命令")
+        print("       · 开发者选项里「OEM 解锁」没打开（开关是灰的说明需要深度测试）")
+        print("       · 新机未通过深度测试审核")
+        print("       · 该机型不支持 fastboot flashing unlock → 试 --legacy（oem unlock）")
+        print()
+        return 1
+
+    print()
+    print(paint("  ✓ 解锁成功。设备会清空数据并重启。", C.GREEN + C.BOLD))
+    print("     首次开机较慢（重新加密数据），属正常现象。")
+    print()
+    return 0
 
 
 def cmd_relock(args: argparse.Namespace) -> int:

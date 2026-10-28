@@ -312,7 +312,8 @@ def build_menu(sess: "Session", env_ok: bool) -> str:
         f"   {_color('13', C.CYAN)}) 关于",
         "",
         f"  {_color('─ 高级（高风险）───────────────────────────────', d)}",
-        f"   {_color('14', C.CYAN)}) BL 回锁           两槽刷好后回锁（会清空数据，慎用）",
+        f"   {_color('14', C.CYAN)}) BL 解锁           解锁 Bootloader（会清空数据）",
+        f"   {_color('15', C.CYAN)}) BL 回锁           回锁 Bootloader（需两槽原厂）",
         "",
         f"   {_color('0', C.CYAN)}) 退出",
     ]
@@ -621,7 +622,8 @@ def run_menu() -> int:
         "11": _menu_reboot,
         "12": _menu_selfcheck,
         "13": _menu_about,
-        "14": _menu_relock,
+        "14": _menu_unlock,
+        "15": _menu_relock,
     }
 
     def _draw() -> None:
@@ -1020,6 +1022,57 @@ def _menu_selfcheck(sess: Session, mon) -> None:
     from ..cli import cmd_selfcheck
 
     cmd_selfcheck(argparse.Namespace())
+    pause()
+
+
+def _menu_unlock(sess: "Session", mon) -> None:
+    """菜单 14：BL 解锁（会清空全部数据）。"""
+    import argparse
+
+    from ..cli import cmd_unlock
+
+    print()
+    print(f"  {_color('BL 解锁', C.BOLD)}")
+    print()
+    print(f"  {_color('解锁会清空全部用户数据', C.RED + C.BOLD)}（应用、照片、账号全部重置）。")
+    print("  解锁后每次开机都会显示 bootloader 已解锁的警告。")
+    print()
+    print("  解锁前必须完成：")
+    print("    1) 设置 → 关于手机 → 连点版本号，开启开发者选项")
+    print("    2) 开发者选项 → 打开「OEM 解锁」和「USB 调试」")
+    print("    3) 新机（ColorOS 16+，如一加 15）先申请「深度测试」并通过审核")
+    print("    4) 设备进入 fastboot：adb reboot bootloader")
+    print()
+    print(f"  {_color('按 q 可取消', C.DIM)}")
+    print()
+
+    if not confirm("已了解会清空数据，继续？"):
+        print(f"  {_color('已取消', C.DIM)}")
+        pause()
+        return
+
+    # 旧设备用 oem unlock？给一次选择（默认 flashing unlock）
+    legacy = False
+    print()
+    print(f"  {_color('解锁命令', C.BOLD)}：")
+    print(f"    {_color('1', C.CYAN)}) fastboot flashing unlock（现代设备，推荐）")
+    print(f"    {_color('2', C.CYAN)}) fastboot oem unlock（旧设备，AOSP 8.0 之前）")
+    print()
+    if ask("请选择", "1").strip() == "2":
+        legacy = True
+
+    print()
+    rc = cmd_unlock(
+        argparse.Namespace(
+            dry_run=False,
+            yes=False,
+            legacy=legacy,
+            adb_port=None,
+        )
+    )
+    if rc != 0:
+        print()
+        print(f"  {_color('解锁未完成。', C.YELLOW)}")
     pause()
 
 
