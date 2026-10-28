@@ -225,3 +225,32 @@ def test_diagnose_rescue_abl_is_readonly():
     actions = [c[0] for c in fb.calls if c]
     for forbidden in ("flash", "erase", "reboot", "-w"):
         assert forbidden not in actions
+
+
+# ---------------------------------------------------------------------------
+# 真机 bug 回归：plan.slot 缺失时，逻辑分区重建必须兜底读设备当前槽
+# （实机 OPD2404/A16 踩到：默认 _a 但设备是 _b → create 错槽 → flash 裸名失败）
+# ---------------------------------------------------------------------------
+
+def test_slot_suffix_falls_back_to_device_current_slot(tmp_path):
+    """plan.slot=None 时，_target_slot_suffix 应读设备 current-slot（此处 _b）。"""
+    plan = _logical_only_plan(tmp_path)
+    assert plan.slot is None
+    fb = _fb(fbd=True, slot="b")
+    ex = FlashExecutor(plan, tmp_path, fb=fb, fbd_only=True)
+    assert ex._target_slot_suffix() == "_b"
+
+
+def test_fbd_only_creates_target_slot_from_device(tmp_path):
+    """fbd_only 应 create 设备当前槽（_b），而不是默认 _a，且刷写成功。"""
+    plan = _logical_only_plan(tmp_path)
+    fb = _fb(fbd=True, slot="b")
+    ex = FlashExecutor(plan, tmp_path, fb=fb, fbd_only=True)
+    ex.on_notice = lambda m: None
+    result = ex.run()
+
+    assert result.ok, result.error
+    created = [c[1] for c in fb.calls if c and c[0] == "create-logical-partition"]
+    # 系统分区 system 的镜像槽位：必须建 _b（设备当前槽）
+    assert any(c.endswith("_b") for c in created), created
+    assert not any(c.endswith("_a") for c in created), created

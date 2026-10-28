@@ -454,6 +454,8 @@ class FlashExecutor:
         self.fbd_only = fbd_only
         self.result = FlashResult(plan=plan)
         self._stop = False
+        #: 设备当前槽位缓存（只读 getvar current-slot 得到；用于兜底 plan.slot 缺失）
+        self._current_slot: str | None = None
 
     def request_stop(self) -> None:
         self._stop = True
@@ -602,9 +604,34 @@ class FlashExecutor:
     # -- 逻辑分区重建 -------------------------------------------------
 
     def _target_slot_suffix(self) -> str:
-        """当前目标槽位后缀，如 "_a"。"""
-        slot = self.plan.slot or "a"
+        """当前目标槽位后缀，如 "_a"。
+
+        优先用 plan.slot；若 plan 没带槽位（如 fbd_only 救砖路径可能未填），
+        则**从设备实际读 current-slot**（只读 getvar），再退回 "_a"。
+        为什么重要：创建逻辑分区时必须建在「当前会写入的那个槽」上，
+        建错槽会导致：① 多占一份 super 空间；② 刷裸名（落到当前槽）时
+        目标槽分区不存在而失败（实机 OPD2404/A16 踩到，见开发记录）。
+        """
+        slot = getattr(self.plan, "slot", None)
+        if not slot:
+            slot = self._cached_current_slot()
+        if not slot:
+            slot = "a"
         return slot if slot.startswith("_") else f"_{slot}"
+
+    def _cached_current_slot(self) -> str | None:
+        """只读读取设备当前槽位（带缓存），失败返回 None。"""
+        if self._current_slot is not None:
+            return self._current_slot
+        if self.fb is None:
+            return None
+        try:
+            v = self.fb.getvar("current-slot")
+            if v:
+                self._current_slot = v.lstrip("_")
+        except Exception:  # noqa: BLE001
+            pass
+        return self._current_slot
 
     def _recreate_logical_partition(self, op: FlashOp) -> str | None:
         """删除并重建逻辑分区，返回 None 表示成功，否则返回错误信息。

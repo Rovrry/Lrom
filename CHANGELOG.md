@@ -2,6 +2,34 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.7.9-rc2] - 2026-10-28
+
+### 修复（真机验证暴露的高危 bug）：逻辑分区重建建错槽位
+
+**现象**：真机（OPD2404 / Android 16 / 当前槽 b）验证 `fbd_only` 执行路径时，
+逻辑分区刷写失败：`Writing 'my_bigball' FAILED (remote: 'No such file or directory')`。
+
+**根因**：`_target_slot_suffix()` 在 `plan.slot` 为空时默认返回 `_a`，但设备
+当前槽是 `_b`。于是：
+1. `create-logical-partition <name>_a` —— **建到了错的槽**；
+2. `flash <name>`（裸名）在 fastbootd 里会映射到**当前槽** `_b`，但 `_b`
+   已被前一步 delete 且没重建 → partition size 0 → 写入失败。
+
+**为什么危险**：真实救砖时这会「删掉当前槽分区、却建到另一个槽」，刷写失败
+甚至让设备更糟。
+
+**修复**：`_target_slot_suffix()` 在 `plan.slot` 缺失时，**兜底只读读取设备
+`current-slot`**（带缓存），不再瞎猜 `_a`。
+
+**真机验证通过**（完好 OPD2404 上以同版本原厂镜像验证，可安全回滚）：
+- FastbootD 线刷可行：`is-userspace=yes`、`super-partition-name=super` 可访问；
+- `fbd_only` 执行器在真机刷 `my_bigball`(335KB) 与 `system_ext`(905MB) 均
+  `ok=True`，delete/create/flash 全链路成功；
+- 设备重启正常开机、分区状态正常。
+
+测试 416 -> 418（新增 2 个槽位兜底回归测试）。此为预发行：仍缺**真故障机**
+上的完整救砖流程验证（本次是在完好机上验证逻辑正确性）。
+
 ## [0.7.9-rc1] - 2026-10-28
 
 ### 新增：FastbootD 救砖分流（只读诊断 + 仅 FastbootD 执行路径）
