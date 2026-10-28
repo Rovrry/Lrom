@@ -18,16 +18,19 @@ from .. import __version__
 
 
 class FlashMode(Enum):
-    """线刷模式（决定槽位与是否重建逻辑分区）。
+    """线刷模式（决定槽位、是否重建逻辑分区、是否只在 FBD 内刷）。
 
     · NORMAL：只刷当前槽，不重建逻辑分区（常规升级/降级）。
     · STRONG：只刷当前槽，强制重建逻辑分区（修 super/COW/刷写异常）。
     · RELOCK：刷到另一槽，防 A/B 槽不一致（回锁前把两槽洗回原厂）。
+    · FBD_ONLY：仅 FastbootD 救砖——进不了 bootloader、只剩 FBD 时，只重建并刷
+      super 逻辑分区，绝不碰 bootloader 侧、不 reboot bootloader。
     """
 
     NORMAL = "normal"
     STRONG = "strong"
     RELOCK = "relock"
+    FBD_ONLY = "fbd_only"
 
     @property
     def label(self) -> str:
@@ -35,6 +38,7 @@ class FlashMode(Enum):
             FlashMode.NORMAL: "普通线刷",
             FlashMode.STRONG: "强力线刷",
             FlashMode.RELOCK: "回锁线刷",
+            FlashMode.FBD_ONLY: "仅FBD救砖",
         }[self]
 
     @property
@@ -42,10 +46,15 @@ class FlashMode(Enum):
         return self is FlashMode.RELOCK
 
     @property
+    def is_fbd_only(self) -> bool:
+        return self is FlashMode.FBD_ONLY
+
+    @property
     def recreate_logical(self) -> bool:
         # 强力线刷强制重建逻辑分区；回锁线刷也要重建（否则大镜像直接覆盖
         # 会触发 super 内 resize 不足，如 my_stock 3.8GB）；普通线刷按紫罗兰
         # 「普通模式」语义不重建（直接覆盖，必要时失败会提示改用强力线刷）。
+        # 仅FBD救砖也必须重建（同强力线刷，否则 resize 不足）。
         return self is not FlashMode.NORMAL
 
 
@@ -326,7 +335,7 @@ def build_menu(sess: "Session", env_ok: bool) -> str:
         f"  {_color('─ 刷写流程 ────────────────────────────────────', d)}",
         f"   {_color('1', C.CYAN)}) 解全量包          选择 ROM 包并解出镜像",
         f"   {_color('2', C.CYAN)}) 预演检查          ★ 不写设备，选模式后预演",
-        f"   {_color('3', C.CYAN)}) 线刷全量包        选模式：普通 / 强力 / 回锁",
+        f"   {_color('3', C.CYAN)}) 线刷全量包        选模式：普通/强力/回锁/仅FBD",
         f"   {_color('4', C.CYAN)}) 只刷指定分区      手动选择分区",
         "",
         f"  {_color('─ 安全 ────────────────────────────────────────', d)}",
@@ -342,12 +351,13 @@ def build_menu(sess: "Session", env_ok: bool) -> str:
         f"   {_color('10', C.CYAN)}) 设备信息          型号 / 版本 / 分区",
         f"   {_color('11', C.CYAN)}) 重启设备          到 Fastboot / FastbootD / 系统",
         f"   {_color('12', C.CYAN)}) 环境自检          重新检查 adb / udev / 权限",
-        f"   {_color('13', C.CYAN)}) 关于",
-        "",        "",
+        f"   {_color('13', C.CYAN)}) 修复FastbootD     能进BL但进不了FBD时，刷回recovery",
+        f"   {_color('14', C.CYAN)}) 关于",
+        "",
         f"  {_color('─ 高级（高风险）───────────────────────────────', d)}",
-        f"   {_color('14', C.CYAN)}) BL 解锁           解锁 Bootloader（会清空数据）",
-        f"   {_color('15', C.CYAN)}) BL 回锁           回锁 Bootloader（需两槽原厂）",
-        f"   {_color('16', C.CYAN)}) 诊断/救砖         判断设备该走哪条刷写路径（只读）",
+        f"   {_color('15', C.CYAN)}) BL 解锁           解锁 Bootloader（会清空数据）",
+        f"   {_color('16', C.CYAN)}) BL 回锁           回锁 Bootloader（需两槽原厂）",
+        f"   {_color('17', C.CYAN)}) 诊断/救砖         判断设备该走哪条刷写路径（只读）",
         "",
         f"   {_color('0', C.CYAN)}) 退出",
     ]
@@ -655,10 +665,11 @@ def run_menu() -> int:
         "10": _menu_device_info,
         "11": _menu_reboot,
         "12": _menu_selfcheck,
-        "13": _menu_about,
-        "14": _menu_unlock,
-        "15": _menu_relock,
-        "16": _menu_fbd_diagnose,
+        "13": _menu_repair_fbd,
+        "14": _menu_about,
+        "15": _menu_unlock,
+        "16": _menu_relock,
+        "17": _menu_fbd_diagnose,
     }
 
     def _draw() -> None:
@@ -875,15 +886,17 @@ def _flow_unpack(sess: Session, mon) -> None:
 
 
 def _choose_flash_mode(dry_run: bool) -> "FlashMode | None":
-    """让用户选择线刷模式（普通 / 强力 / 回锁）。
+    """让用户选择线刷模式（普通 / 强力 / 回锁 / 仅FBD救砖）。
 
-    三档的区别：
+    区别：
       · 普通线刷：只刷**当前激活槽**，**不重建**逻辑分区（直接覆盖，对应紫罗兰
         「普通模式」；大镜像空间不足时会提示改用强力线刷）。
       · 强力线刷：只刷**当前激活槽**，但**强制 delete/create 重建**逻辑分区，
         用于 super/COW 异常、逻辑分区刷写失败等（对应紫罗兰「强力线刷」）。
       · 回锁线刷：刷到**另一个槽**，并**重建逻辑分区**，用于配合回锁前把两槽都
         洗回原厂（防止 A/B 槽不一致）。
+      · 仅FBD救砖：进不了 bootloader、只剩 FastbootD 时用；只在 FBD 内重建并刷
+        super 逻辑分区，**绝不碰 bootloader 侧、不 reboot bootloader**。
 
     返回 FlashMode；用户取消则返回 None。
     """
@@ -903,6 +916,10 @@ def _choose_flash_mode(dry_run: bool) -> "FlashMode | None":
         f"    {_color('3', C.CYAN)}) 回锁线刷   "
         f"{_color('刷到另一槽，防 A/B 槽不一致（回锁前用）', C.DIM)}"
     )
+    print(
+        f"    {_color('4', C.CYAN)}) 仅FBD救砖  "
+        f"{_color('进不了BL时：只在FastbootD刷逻辑分区，绝不碰BL侧', C.DIM)}"
+    )
     print(f"    {_color('0', C.CYAN)}) 返回上级")
     print()
     while True:
@@ -916,6 +933,8 @@ def _choose_flash_mode(dry_run: bool) -> "FlashMode | None":
             return FlashMode.STRONG
         if ans == "3":
             return FlashMode.RELOCK
+        if ans == "4":
+            return FlashMode.FBD_ONLY
         print(f"  {_color('输入无效，请重新选择', C.YELLOW)}")
 
 
@@ -952,22 +971,61 @@ def _flow_flash(
             return
         mode = chosen
 
+    # 「仅FBD救砖」：要求设备在 FastbootD，且只刷逻辑分区（绝不碰 BL 侧）
+    fbd_only_partitions = None
+    if mode is FlashMode.FBD_ONLY:
+        from ..device.discover import DeviceMode as _DM, detect as _detect
+
+        try:
+            _dev = _detect()
+        except Exception:  # noqa: BLE001
+            _dev = None
+        if getattr(_dev, "mode", None) != _DM.FASTBOOTD:
+            print()
+            print(_color("  仅FBD救砖要求设备已在 FastbootD（is-userspace=yes）。", C.RED + C.BOLD))
+            print("  本模式不会替你 reboot 切换模式（以免断掉仅剩 FBD 设备的唯一通道）。")
+            print("  请先手动进入 FastbootD 后重试。")
+            pause()
+            return
+        try:
+            from ..core.plan import Phase as _Phase, build_plan as _bp
+            from ..core.package import inspect_package as _inspect
+
+            _info = _inspect(sess.package) if sess.package else None
+            _plan = _bp(_info.manifest, package_path=str(sess.package))
+            fbd_only_partitions = [
+                op.partition for op in _plan.active_ops if op.phase is _Phase.FASTBOOTD
+            ]
+        except Exception as exc:  # noqa: BLE001
+            print(_color(f"  构建逻辑分区清单失败：{exc}", C.RED))
+            pause()
+            return
+        if not fbd_only_partitions:
+            print(_color("  该包没有逻辑分区，无需用仅FBD救砖。", C.YELLOW))
+            pause()
+            return
+        print()
+        print(_color("  仅FBD救砖：将只重建并刷下列逻辑分区，绝不碰 bootloader 侧：", C.BOLD))
+        print(_color("    " + "  ".join(fbd_only_partitions), C.DIM))
+        print()
+
     ns = argparse.Namespace(
         package=sess.package,
         images=str(sess.image_dir),
         dry_run=dry_run,
         yes=False,
-        partitions=None,
+        partitions=fbd_only_partitions,
         allow_dangerous=False,
         force_arb=False,
         no_reboot=True,
         wipe=False,
         both_slots=False,
-        # 普通/回锁不重建逻辑分区；强力线刷强制重建
+        # 普通不重建；强力/回锁/仅FBD 强制重建
         no_recreate_logical=not mode.recreate_logical,
         adb_port=None,
         to_opposite_slot=mode.to_opposite_slot,
         slot=None,
+        fbd_only=(mode is FlashMode.FBD_ONLY),
     )
 
     if dry_run:
@@ -1025,6 +1083,8 @@ def _flow_flash(
                 C.YELLOW,
             )
         )
+    elif mode is FlashMode.FBD_ONLY:
+        print(_color("    · 只在 FastbootD 内重建并刷逻辑分区；绝不碰 bootloader 侧、不 reboot bootloader", C.YELLOW))
     elif mode is FlashMode.STRONG:
         print(_color("    · 将强制 delete/create 重建逻辑分区（修 super/COW 异常）", C.YELLOW))
     else:
@@ -1309,11 +1369,21 @@ def _menu_fbd_diagnose(sess: "Session", mon) -> None:
         elif pick == "3":
             bl_dead = True
 
+    # 设备在 bootloader 时：可选「实测能否进 FastbootD」以判断是否需要「修复FBD」。
+    # 这是唯一允许 reboot 的场景（BL 已好，进不去 FBD 也留在 BL，不失联）。
+    probe_fbd = False
+    if mode == DeviceMode.FASTBOOT:
+        print("  是否实测「能否进入 FastbootD」？")
+        print(_color("    会执行一次 fastboot reboot fastboot 探测（安全：进不去也只是留在 bootloader）。", C.DIM))
+        ans = ask("实测 FBD 可达性？（y/N）", "n").strip().lower()
+        probe_fbd = ans in ("y", "yes", "是")
+
     adb = _Adb() if mode == DeviceMode.ADB else None
     fb = None if mode == DeviceMode.ADB else _Fb()
 
     diag = diagnose_fbd(
-        adb=adb, fb=fb, bl_declared_dead=bl_dead, bl_symptom=bl_symptom
+        adb=adb, fb=fb, bl_declared_dead=bl_dead, bl_symptom=bl_symptom,
+        probe_fbd=probe_fbd,
     )
 
     print()
@@ -1322,17 +1392,23 @@ def _menu_fbd_diagnose(sess: "Session", mon) -> None:
         print(f"    {line}")
     print()
 
+    # 附加：内测/Beta 版倾向告警 + ARB 只读预检（仅 ADB 态可读，纯只读）
+    if mode == DeviceMode.ADB:
+        _print_beta_and_arb_warnings(adb, getattr(dev, "serial", None))
+        print()
+
     # 给出下一步指引（不自动执行，交用户决定）
     if diag.recommendation is FbdRecommendation.FBD_ONLY:
-        print(_color("  建议：走【仅 FastbootD】救砖（当前版本暂未接入菜单执行入口）。", C.YELLOW))
-        print("    手动流程：在 FastbootD 内对每个逻辑分区 delete/create 后 flash，绝不碰 bootloader 侧分区。")
+        print(_color("  建议：用菜单 3「线刷全量包」选「仅FBD救砖」模式执行。", C.YELLOW))
+        print("    该模式只刷逻辑分区、绝不碰 bootloader 侧分区、不会替你 reboot 切换模式。")
     elif diag.recommendation is FbdRecommendation.RESCUE_ABL:
-        print(_color("  建议：用 FastbootD 刷【旧版 abl】救回 bootloader（高风险，版本必须对得上）。", C.YELLOW))
-        print("    手动流程：fastboot flash abl_a <旧版abl.img>（只刷当前槽），再 fastboot reboot bootloader 验证。")
-        print(_color("    各机型 abl 不通用；ARB 熔断 / 新 abl 锁死的机型不可用。", C.DIM))
+        print(_color("  建议：用 FastbootD 刷【旧版 abl】救回 bootloader —— 但本版本【不提供一键入口】。", C.YELLOW))
+        print("    原因：刷错 abl / 触发 ARB 反回滚可能硬砖，风险高，故只给手动命令。")
+        print("    手动流程：fastboot flash abl_<当前槽> <旧版abl.img>（只刷当前槽），再 fastboot reboot bootloader 验证。")
+        print(_color("    各机型 abl 不通用；务必先做 ARB 只读预检（见上），ARB 熔断 / 新 abl 锁死的机型此路不通。", C.DIM))
     elif diag.recommendation is FbdRecommendation.REPAIR_FBD:
-        print(_color("  建议：走【修复 FastbootD】（当前版本暂未接入菜单执行入口）。", C.YELLOW))
-        print("    核心：刷回 recovery.img（fastbootd 寄生在 recovery 里），再 reboot fastboot 验证。")
+        print(_color("  建议：用菜单 13「修复FastbootD」—— 核心是刷回 recovery.img（fastbootd 寄生在 recovery 里）。", C.YELLOW))
+        print("    注意：仅「有独立 recovery 分区」的机型适用；刷 recovery 本身不碰 ARB，相对安全。")
     elif diag.recommendation is FbdRecommendation.NORMAL:
         if diag.state.value == "adb":
             print(_color("  设备正常（已开机）。要刷机请先重启到 fastboot/fastbootd。", C.GREEN))
@@ -1340,6 +1416,151 @@ def _menu_fbd_diagnose(sess: "Session", mon) -> None:
             print(_color("  FBD 环境正常，用菜单 2/3 的普通或强力线刷即可。", C.GREEN))
     elif diag.recommendation is FbdRecommendation.UNKNOWN:
         print(_color("  未能判断，请确认设备已连接（adb / fastboot 均可用）。", C.YELLOW))
+    pause()
+
+
+def _print_beta_and_arb_warnings(adb, serial) -> None:
+    """只读打印：内测/Beta 版倾向 + 设备 ARB 回滚索引（仅 ADB 态可用）。"""
+    # 1) 内测版倾向
+    try:
+        from ..device.discover import detect_beta_channel
+
+        bi = detect_beta_channel(adb, serial)
+        if bi.suspicion == "beta_likely":
+            print(_color("  ⚠ 疑似【内测/Beta 版】系统：", C.RED + C.BOLD))
+            for r in bi.reasons:
+                print(f"    · {r}")
+            print(_color("    内测版是 fastboot 被封的高危触发源，且内测→正式/降级可能触发 ARB。请谨慎。", C.YELLOW))
+        elif bi.suspicion == "stable_likely":
+            print(f"  内测/正式判定：{_color('偏正式版', C.GREEN)}（{', '.join(bi.reasons)}）")
+            print(_color("    注：正式版 13/13T 等新版也已限制 fastboot，别只看是否内测。", C.DIM))
+        else:
+            print(f"  内测/正式判定：{_color('无法确定', C.YELLOW)}（请以 设置→关于→尝鲜/内测 渠道为准）")
+    except Exception:  # noqa: BLE001
+        pass
+
+    # 2) ARB 只读预检（读设备回滚索引）
+    try:
+        from ..core.arb import arb_root_hint, read_device_arb_adb
+
+        arb = read_device_arb_adb(adb, serial)
+        if arb is not None and getattr(arb, "arb_index", None) is not None:
+            idx = arb.arb_index
+            level = C.RED if idx >= 1 else C.GREEN
+            print(f"  设备 ARB 回滚索引：{_color(str(idx), level)}"
+                  + (_color("  ⚠ 已熔断，任何降级/刷旧 abl 都可能硬砖！", C.RED) if idx >= 1 else ""))
+        else:
+            print(_color("  ARB 回滚索引：读不到。", C.DIM))
+            print(_color(f"    {arb_root_hint()}", C.DIM))
+    except Exception:  # noqa: BLE001
+        print(_color("  ARB 预检未完成（读不到设备回滚索引）。", C.DIM))
+
+
+def _menu_repair_fbd(sess: "Session", mon) -> None:
+    """菜单 13：修复 FastbootD —— 能进 bootloader 但进不了 FastbootD 时，刷回 recovery。
+
+    机制：fastbootd 寄生在 recovery 里，recovery 坏了 → 进不了 FBD → 刷回 recovery。
+    安全：只刷 recovery 分区，不碰 abl/xbl/ARB/persist/ocdt；刷错通常是 bootloop/卡
+    fastboot，可刷回，非硬砖（有社区案例支撑）。
+    """
+    from pathlib import Path
+
+    from ..core.flash import repair_fbd
+    from ..device.discover import DeviceMode, detect
+    from ..device.runner import FastbootRunner
+
+    print()
+    print(f"  {_color('修复 FastbootD', C.RED + C.BOLD)}")
+    print(_color("  fastbootd 跑在 recovery 里；刷回 recovery 即可让 fastbootd 恢复。", C.DIM))
+    print()
+
+    # 需设备在 bootloader（本修复站在 bootloader 通道上）
+    try:
+        dev = detect()
+    except Exception:  # noqa: BLE001
+        dev = None
+    mode = getattr(dev, "mode", None)
+    if mode is None:
+        print(_color("  未检测到设备。请检查数据线 / 驱动 / fastboot。", C.YELLOW))
+        pause()
+        return
+    if mode != DeviceMode.FASTBOOT:
+        print(_color("  本修复需在 Fastboot（bootloader）模式下执行。", C.RED + C.BOLD))
+        print("  当前设备不在 bootloader（请先 `adb reboot bootloader`）。")
+        pause()
+        return
+
+    # 选 recovery.img：默认用当前解包目录的 recovery.img，也可输入自定义路径
+    if not sess.unpacked:
+        print(f"  {_color('尚未解包（无默认镜像）。可手动指定 recovery.img 路径。', C.YELLOW)}")
+    default_img = ""
+    try:
+        if sess.unpacked:
+            cand = Path(sess.image_dir) / "recovery.img"
+            if cand.exists():
+                default_img = str(cand)
+    except Exception:  # noqa: BLE001
+        default_img = ""
+    if default_img:
+        print(f"  默认镜像（当前解包目录）：{default_img}")
+    print("  请输入 recovery.img 路径（直接回车用默认；无默认则必须输入；输入 q 取消）")
+    raw = ask("recovery.img 路径", default_img)
+    if raw.strip().lower() in ("q", "quit", "exit") or not raw.strip():
+        print(f"  {_color('已取消，未写入任何设备', C.DIM)}")
+        pause()
+        return
+    recovery_img = Path(raw.strip()).expanduser()
+    if not recovery_img.exists():
+        print(_color(f"  recovery 镜像不存在：{recovery_img}", C.RED))
+        pause()
+        return
+
+    print(f"  recovery 镜像：{recovery_img}（{recovery_img.stat().st_size / 2**20:.0f} MB）")
+    print(_color("  ⚠ 建议用【与设备当前系统同版本】的官方全量包里的 recovery.img。", C.YELLOW))
+    print(_color("  ⚠ 刷错代价：通常 bootloop / 卡 fastboot（可刷回），非硬砖；但请尽量用匹配版本。", C.DIM))
+    print()
+    ans = ask("确认开始修复 FastbootD？输入 YES 继续（其他取消）", "")
+    if ans.strip() != "YES":
+        print(f"  {_color('已取消，未写入任何设备', C.DIM)}")
+        pause()
+        return
+
+    # 版本信息（尽力而为）
+    pkg_info = None
+    try:
+        from ..core.package import inspect_package
+
+        if sess.package and Path(sess.package).exists():
+            pkg_info = inspect_package(Path(sess.package))
+    except Exception:  # noqa: BLE001
+        pass
+    # bootloader 读不到系统版本；尝试从包的 metadata 得版本作参照
+    dev_version = getattr(pkg_info, "display_os_version", None) if pkg_info else None
+
+    def on_notice(msg: str) -> None:
+        print(f"    {msg}")
+
+    res = repair_fbd(
+        FastbootRunner(), recovery_img,
+        package_info=pkg_info, device_version=dev_version,
+        device_model=getattr(dev, "model", None), on_notice=on_notice,
+    )
+    print()
+    if res.ok and res.flashed:
+        if res.verified_fbd:
+            print(_color("  ✓ 修复成功：FastbootD 已恢复。", C.GREEN + C.BOLD))
+        else:
+            print(_color("  ✓ recovery 已刷入。", C.GREEN))
+    elif res.ok and not res.flashed:
+        print(_color("  fastbootd 本身正常，无需修复。", C.GREEN))
+    else:
+        print(_color("  ✗ 修复未完成。", C.RED + C.BOLD))
+        if res.error:
+            print(f"    {res.error}")
+    if res.warnings:
+        print()
+        for w in res.warnings:
+            print(_color(f"  ⚠ {w}", C.YELLOW))
     pause()
 
 

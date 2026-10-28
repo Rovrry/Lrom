@@ -254,3 +254,102 @@ def test_fbd_only_creates_target_slot_from_device(tmp_path):
     # 系统分区 system 的镜像槽位：必须建 _b（设备当前槽）
     assert any(c.endswith("_b") for c in created), created
     assert not any(c.endswith("_a") for c in created), created
+
+
+# ---------------------------------------------------------------------------
+# 入口接线（DEVNOTES 1.8）：仅FBD作为线刷第4模式；修复FastbootD在「工具」区菜单13
+# ---------------------------------------------------------------------------
+
+def test_fbd_only_is_a_flash_mode():
+    """仅FBD救砖应是 FlashMode 的第 4 个模式，而非独立菜单项。"""
+    from lrom.tui import menu
+
+    assert hasattr(menu.FlashMode, "FBD_ONLY")
+    assert menu.FlashMode.FBD_ONLY.is_fbd_only is True
+    # 其它模式都不是 fbd_only
+    for m in (menu.FlashMode.NORMAL, menu.FlashMode.STRONG, menu.FlashMode.RELOCK):
+        assert m.is_fbd_only is False
+
+
+def test_repair_fbd_handler_at_menu_13():
+    """修复FastbootD 应在「工具」区（菜单13），不在高危区。"""
+    import inspect
+
+    from lrom.tui import menu
+
+    assert callable(getattr(menu, "_menu_repair_fbd", None))
+    src = inspect.getsource(menu)
+    assert '"13": _menu_repair_fbd' in src
+    # 已不在高危旧编号 18 / 没有独立仅FBD handler
+    assert '"18":' not in src
+    assert "_menu_fbd_only" not in src
+
+
+def test_cmd_flash_forwards_fbd_only():
+    """cmd_flash 必须把 args.fbd_only 透传给 FlashExecutor（否则菜单17形同虚设）。"""
+    import inspect
+
+    import lrom.cli as cli
+
+    src = inspect.getsource(cli.cmd_flash)
+    assert 'fbd_only=getattr(args, "fbd_only", False)' in src
+
+
+# ---------------------------------------------------------------------------
+# 修复FBD 判定：bootloader 态实测 FBD 可达性（probe_fbd）
+# ---------------------------------------------------------------------------
+
+def _fb_bl_with_probe(reachable: bool):
+    """bootloader 态 fake fb；reboot fastboot 后根据 reachable 返回 FBD 或 BL。"""
+    class _FB(FakeFastboot):
+        _state = {"in_fbd": False}
+
+        def devices(self):
+            return ["FAKE"]
+
+        def is_fastbootd(self):
+            return self._state["in_fbd"]
+
+        def getvar(self, name):
+            if name == "current-slot":
+                return "a"
+            if name == "is-userspace":
+                return "yes" if self._state["in_fbd"] else "no"
+            return None
+
+        def run(self, *args, timeout=None):
+            self.calls.append(list(args))
+            if args and args[0] == "reboot" and args[1] == "fastboot":
+                self._state["in_fbd"] = reachable
+            return __import__("lrom.device.runner", fromlist=["RunResult"]).RunResult(
+                argv=list(args), exit_code=0, stdout="ok\n"
+            )
+
+    return _FB()
+
+
+def test_probe_fbd_reachable_gives_normal():
+    fb = _fb_bl_with_probe(reachable=True)
+    d = diagnose_fbd(adb=None, fb=fb, probe_fbd=True)
+    # _probe_fbd_reachable 用 time.sleep + 轮询；FakeFastboot 立即返回 FBD
+    assert d.recommendation is FbdRecommendation.NORMAL
+
+
+def test_probe_fbd_unreachable_gives_repair_fbd(monkeypatch):
+    # 让轮询尽快超时
+    import lrom.core.flash as flash
+
+    monkeypatch.setattr(flash.time, "sleep", lambda *a, **k: None)
+    # 用一个时间已过期的 deadline：把 time.time 固定递增
+    seq = iter(range(0, 10_000, 100))
+    monkeypatch.setattr(flash.time, "time", lambda: next(seq))
+    fb = _fb_bl_with_probe(reachable=False)
+    d = diagnose_fbd(adb=None, fb=fb, probe_fbd=True)
+    assert d.recommendation is FbdRecommendation.REPAIR_FBD
+
+
+def test_probe_never_used_from_fbd_state():
+    """在 FBD 态即使 probe_fbd=True 也绝不发 reboot（不踢掉仅FBD设备）。"""
+    fb = _fb(fbd=True)
+    diagnose_fbd(adb=None, fb=fb, bl_symptom=BlSymptom.INSTANT_EXIT, probe_fbd=True)
+    assert not any(c and c[0] == "reboot" for c in fb.calls)

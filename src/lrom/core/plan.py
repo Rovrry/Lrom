@@ -104,6 +104,11 @@ WARN_PARTITIONS = frozenset(
         "vbmeta",
         "vbmeta_system",
         "vbmeta_vendor",
+        # recovery：fastbootd（用户空间 fastboot）寄生在 recovery 里
+        # （AOSP：「fastboot / boot-control / health HAL 打包进 recovery 镜像」）。
+        # recovery 坏了 → 进不了 fastbootd → 救砖能力全失。所以可刷但须提示风险
+        # （「修复 FastbootD」正是靠刷回 recovery）。
+        "recovery",
         # OCDT（engineering_cdt）：决定能否进 Fastboot 的机独有校准分区。
         # 用非本机的会被拒绝进 Fastboot，损坏后售后也无法修复（只能拆字库）。
         # 备份清单里有它，但刷写时必须明确警告，不能当普通分区静默刷。

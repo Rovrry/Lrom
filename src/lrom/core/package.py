@@ -70,6 +70,10 @@ class PackageInfo:
     android_version: str | None = None
     security_patch: str | None = None
     ota_id: str | None = None
+    #: post-build 完整指纹，如 "OnePlus/OPD2404/OP5D77L1:16/.../U.247...:user/release-keys"
+    post_build: str | None = None
+    #: post-build-incremental，如 "U.247d78a_a3a1b_629cb"
+    build_incremental: str | None = None
 
     # payload
     manifest: PayloadManifest | None = None
@@ -252,6 +256,8 @@ def inspect_package(path: str | Path) -> PackageInfo:
                 info.android_version = meta.get("android_version")
                 info.security_patch = meta.get("security_patch")
                 info.ota_id = meta.get("ota-id")
+                info.post_build = meta.get("post-build")
+                info.build_incremental = meta.get("post-build-incremental")
 
             if "payload.bin" not in names:
                 info.add(

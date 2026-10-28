@@ -2,6 +2,51 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.7.9] - 2026-10-28
+
+正式版，包含 0.7.9-rc1/rc2 全部内容（FastbootD 救砖分流诊断、仅FBD/修复FBD、
+槽位建错修复）+ 本轮新增的交互优化与真机验证。**已在真机 OPD2404 上验证**
+FastbootD 刷逻辑分区、菜单流程、护栏（详见各条与 rc1/rc2 记录）。
+
+### 新增：修复 FastbootD（刷回 recovery）入口（菜单 13「工具」区）
+
+- fastbootd 寄生在 recovery 镜像里（AOSP 官方）→ recovery 坏了进不了 FBD →
+  刷回 recovery 即可让 fastbootd 恢复。
+- 安全：**只刷 recovery 分区，不碰 abl/xbl/ARB/persist/ocdt**；先 `probe_fbd`
+  实测 FBD 是否真坏（能进 → 无需修复，一个字节都不刷）；只读确认有独立
+  `recovery` 分区（没有则提示改刷 boot/init_boot，不做）；版本不匹配**只警告
+  不截断**（第三方 recovery 也可能可用）；明确告知刷错代价=bootloop/卡fastboot可刷回、非硬砖。
+- 镜像路径**可选**：默认用当前解包目录的 `recovery.img`，也可输入自定义路径。
+
+### 改进：交互重排（按使用习惯）
+
+- **「仅FBD救砖」并入线刷**：「线刷全量包」（菜单3）选模式时新增第 4 个模式
+  `4) 仅FBD救砖`（普通/强力/回锁/仅FBD）。删掉原先独立的菜单项。该模式要求
+  设备已在 FastbootD、只刷逻辑分区、绝不碰 BL 侧、不代为 reboot 切模式。
+- **「修复FastbootD」从「高级(高风险)」移到「工具」区**（菜单 13）。
+- 菜单编号重排：10-14 工具（含 13 修复FastbootD / 14 关于），15-17 高级。
+
+### 改进：ARB 读取引导 + 内测版判定 + 诊断预检
+
+- **ARB 读取（`find_root_shell` / `arb_root_hint`）**：ARB 在 xbl_config 里，读取需
+  root。普通 adb shell 读不到；现明确提示「在 root 管理器（Magisk/KernelSU/
+  SukiSU/APatch）里**给 shell 授予 root 权限**后重试」，并依次尝试
+  `su -c` / `ksu -c` / `ksud su -c` 等多种 root shell。菜单 6 / 诊断均给出该提示。
+- **内测/Beta 版只读判定（`detect_beta_channel`）**：多 prop 交叉给「倾向性」
+  （一加内测包通常仍是 user+release-keys，不能只看 userdebug）；菜单 17 诊断显示。
+- 诊断（菜单 17）新增 **ARB 只读预检** 和 **FBD 可达性实测 `probe_fbd`**（仅在
+  bootloader 态安全探测，绝不从 FBD 态 reboot 试探）。
+- `recovery` 分区归入 `WARN_PARTITIONS`（之前落到 SAFE 会静默刷的隐患）。
+
+### 新增：PackageInfo 解析 post-build / build_incremental
+
+- 从全量包 `META-INF/com/android/metadata` 读取 `post-build` / `post-build-incremental`
+  版本指纹（用于修复FBD 的版本比对参照）。
+
+测试 393 -> 441。真机验证：菜单3 第4模式选仅FBD、菜单13 修复FBD（镜像路径可选/
+probe 识别 FBD 健康不误刷）、FastbootD 刷 my_bigball/system_ext 成功、ARB root 提示、
+设备健康。
+
 ## [0.7.9-rc2] - 2026-10-28
 
 ### 修复（真机验证暴露的高危 bug）：逻辑分区重建建错槽位

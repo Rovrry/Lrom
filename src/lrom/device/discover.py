@@ -230,3 +230,76 @@ def list_partitions(adb: AdbRunner, serial: str) -> set[str]:
     if res.exit_code != 0:
         return set()
     return {line.strip() for line in res.stdout.splitlines() if line.strip()}
+
+
+@dataclass
+class BetaInfo:
+    """内测/Beta 版判定的只读结果（多字段交叉，非单一 prop）。"""
+
+    build_type: str = ""          # ro.build.type（user / userdebug）
+    build_tags: str = ""          # ro.build.tags（release-keys / test-keys）
+    description: str = ""         # ro.build.description
+    incremental: str = ""         # ro.build.version.incremental
+    display_id: str = ""          # ro.build.display.id
+    suspicion: str = "unknown"    # "beta_likely" / "stable_likely" / "unknown"
+    reasons: list[str] = None     # type: ignore[assignment]
+
+    def __post_init__(self) -> None:
+        if self.reasons is None:
+            self.reasons = []
+
+
+def detect_beta_channel(adb: AdbRunner, serial: str | None = None) -> BetaInfo:
+    """只读（免 root，纯 getprop）判断设备是否内测/Beta 版。
+
+    重要认知（据调查，见 docs/research/recovery-abl-beta-factcheck.md §B）：
+      · 一加内测包 **通常仍是 user + release-keys**，跟正式版版本号也可能一样，
+        所以**不能只看 ro.build.type=userdebug** 就判正式版。
+      · 没有单一可靠 prop；只能**多字段交叉 + 给出"倾向性"而非断言**。
+      · 官方「设置→关于→尝鲜/内测」渠道标识才是权威，prop 只作辅助。
+
+    本函数给出 suspicion="beta_likely" / "stable_likely" / "unknown" 的**倾向**，
+    并把依据写进 reasons，绝不武断断言。
+    """
+    if serial:
+        adb.serial = serial
+    info = BetaInfo(
+        build_type=(adb.getprop("ro.build.type") or "").strip(),
+        build_tags=(adb.getprop("ro.build.tags") or "").strip(),
+        description=(adb.getprop("ro.build.description") or "").strip(),
+        incremental=(adb.getprop("ro.build.version.incremental") or "").strip(),
+        display_id=(adb.getprop("ro.build.display.id") or "").strip(),
+    )
+
+    beta_signals = 0
+    stable_signals = 0
+    low_id = " ".join(
+        [info.build_type, info.build_tags, info.description, info.display_id]
+    ).lower()
+
+    # 明确的 beta/test 迹象
+    if "userdebug" in info.build_type.lower() or "eng" in info.build_type.lower():
+        beta_signals += 2
+        info.reasons.append("ro.build.type 非 user（疑似调试/工程版）")
+    if "test-keys" in info.build_tags.lower():
+        beta_signals += 2
+        info.reasons.append("ro.build.tags=test-keys（测试签名）")
+    if any(k in low_id for k in ("beta", "internal", "内测", "尝鲜", "preview")):
+        beta_signals += 2
+        info.reasons.append("版本串含 beta/internal/内测/尝鲜 字样")
+
+    # 正式版迹象
+    if info.build_type.lower() == "user":
+        stable_signals += 1
+        info.reasons.append("ro.build.type=user")
+    if "release-keys" in info.build_tags.lower():
+        stable_signals += 1
+        info.reasons.append("ro.build.tags=release-keys")
+
+    if beta_signals and beta_signals >= stable_signals:
+        info.suspicion = "beta_likely"
+    elif stable_signals >= 2 and beta_signals == 0:
+        info.suspicion = "stable_likely"
+    else:
+        info.suspicion = "unknown"
+    return info

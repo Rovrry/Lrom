@@ -156,10 +156,37 @@ def parse_xbl_config(path: str | Path) -> ArbInfo:
 # 设备侧读取
 # --------------------------------------------------------------------------
 
+def find_root_shell(adb, timeout: float = 8.0) -> str | None:
+    """探测设备上可用的 root shell 命令前缀（如 "su -c"、"ksu -c"）。
+
+    一加/欧加设备上，ARB 存在 xbl_config 里，读它需要 root。普通 adb shell 是
+    uid=2000，读不到；但只要 root 管理器（Magisk / KernelSU / SukiSU / APatch）
+    **给 shell 授予 root**，`su -c` 就能用。这里按常见实现依次尝试。
+
+    返回可用的 root 前缀（含 -c），或 None（未授予 shell root）。
+    """
+    for prefix in ("su -c", "ksu -c", "ksud su -c", "/system/bin/su -c"):
+        try:
+            probe = adb.shell(f"{prefix} id", timeout=timeout)
+        except Exception:
+            continue
+        if probe.exit_code == 0 and "uid=0" in probe.stdout:
+            return prefix
+    return None
+
+
+def arb_root_hint() -> str:
+    """ARB 读不到时给用户的说明（引导在 root 管理器里给 shell 授权）。"""
+    return (
+        "ARB 存在 xbl_config 分区，读取需要 root。普通 adb shell 是普通用户读不到；"
+        "请在 root 管理器（Magisk / KernelSU / SukiSU / APatch）里【给 shell 授予 root 权限】后重试。"
+    )
+
+
 def read_device_arb_adb(adb, serial: str | None = None) -> ArbInfo | None:
     """通过 adb + root 读取设备当前 xbl_config 的 ARB。
 
-    优先读 fuse（ro.boot.arb 等属性）；不可用时从 xbl_config 分区回读。
+    优先读 fuse（ro.boot.arb 等属性）；不可用时从 xbl_config 分区回读（需 shell root）。
     """
     if serial:
         adb.serial = serial
@@ -173,20 +200,16 @@ def read_device_arb_adb(adb, serial: str | None = None) -> ArbInfo | None:
         if val and val.isdigit():
             return ArbInfo(0, 0, int(val), source=f"prop:{prop}")
 
-    # 2) 在设备上直接解析 xbl_config（需要 root）
-    #    先快速探测 su 是否可用，避免在无 root 设备上长时间阻塞
-    try:
-        probe = adb.shell("su -c id", timeout=8)
-    except Exception:
-        return None
-    if probe.exit_code != 0 or "uid=0" not in probe.stdout:
+    # 2) 在设备上直接解析 xbl_config（需要 root —— root 管理器给 shell 授权）
+    root = find_root_shell(adb)
+    if root is None:
         return None
 
     import base64
     import tempfile
 
     script = (
-        "su -c 'dd if=/dev/block/by-name/xbl_config$(getprop ro.boot.slot_suffix) "
+        f"{root} 'dd if=/dev/block/by-name/xbl_config$(getprop ro.boot.slot_suffix) "
         "bs=4096 2>/dev/null | base64'"
     )
     try:

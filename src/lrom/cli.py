@@ -1049,6 +1049,8 @@ def cmd_flash(args: argparse.Namespace) -> int:
         on_notice=lambda msg: print(paint(f"  {msg}", C.YELLOW)),
         # 若目标槽与当前不同，进入 fastboot 后先切槽再刷
         target_slot=(_target_slot if _target_slot != cur_slot else None),
+        # 「仅 FastbootD」救砖：只在 FBD 刷逻辑分区，绝不 reboot bootloader
+        fbd_only=getattr(args, "fbd_only", False),
     )
 
     # ---- 刷写进行中的实时提示（防止用户误以为卡死而拔线）----
@@ -1689,9 +1691,12 @@ def cmd_arb(args: argparse.Namespace) -> int:
             adb = AdbRunner(server_port=args.adb_port)
             dev_arb = read_device_arb_adb(adb, dev.serial)
             if dev_arb is None:
+                from .core.arb import arb_root_hint
+
                 dev_note = (
-                    "设备在 ADB 模式但无法读取 ARB（需要 root）。\n"
-                    "       把设备切到 fastboot 模式可尝试用 fetch 读取，\n"
+                    "设备在 ADB 模式但无法读取 ARB。\n"
+                    f"       {arb_root_hint()}\n"
+                    "       也可以把设备切到 fastboot 模式用 fetch 读取，\n"
                     "       但部分一加机型（含平板 Pro）的 bootloader 不支持 fetch。"
                 )
         elif dev.mode in (DeviceMode.FASTBOOT, DeviceMode.FASTBOOTD):

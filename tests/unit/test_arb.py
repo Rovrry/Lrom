@@ -272,3 +272,51 @@ def test_supports_fetch_detection():
     )
     assert _supports_fetch(ok) is True
     assert _supports_fetch(bad) is False
+
+
+# ---------------------------------------------------------------------------
+# root shell 探测（ARB 读取依赖 root 管理器给 shell 授权）
+# ---------------------------------------------------------------------------
+
+def test_find_root_shell_magisk(monkeypatch):
+    from lrom.core.arb import find_root_shell
+
+    class _Adb:
+        def shell(self, cmd, timeout=8):
+            import types
+            ok = cmd.startswith("su -c")  # 只 su 可用
+            return types.SimpleNamespace(exit_code=0 if ok else 127,
+                                         stdout="uid=0(root)" if ok else "not found")
+
+    assert find_root_shell(_Adb()) == "su -c"
+
+
+def test_find_root_shell_kernelsu(monkeypatch):
+    from lrom.core.arb import find_root_shell
+
+    class _Adb:
+        def shell(self, cmd, timeout=8):
+            import types
+            ok = cmd.startswith("ksu -c")
+            return types.SimpleNamespace(exit_code=0 if ok else 127,
+                                         stdout="uid=0(root)" if ok else "")
+
+    assert find_root_shell(_Adb()) == "ksu -c"
+
+
+def test_find_root_shell_none_when_no_root():
+    from lrom.core.arb import find_root_shell
+
+    class _Adb:
+        def shell(self, cmd, timeout=8):
+            import types
+            return types.SimpleNamespace(exit_code=127, stdout="")
+
+    assert find_root_shell(_Adb()) is None
+
+
+def test_arb_root_hint_mentions_manager():
+    from lrom.core.arb import arb_root_hint
+
+    h = arb_root_hint()
+    assert "shell" in h and ("Magisk" in h or "KernelSU" in h)

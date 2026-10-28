@@ -146,6 +146,7 @@ def diagnose_fbd(
     fb: FastbootRunner | None = None,
     bl_declared_dead: bool = False,
     bl_symptom: "BlSymptom" = None,  # type: ignore[assignment]
+    probe_fbd: bool = False,
 ) -> FbdDiagnosis:
     """只读诊断设备处于哪种刷写场景，给出「该走哪条路」的建议。
 
@@ -155,10 +156,12 @@ def diagnose_fbd(
     fastbootd-rescue-factcheck.md 与 AOSP Move fastboot to userspace）。
 
     设计铁律（安全）：
-      · **纯只读**：绝不调用 reboot / flash / erase / set-active 等任何写/重启命令。
-      · 绝不发 `reboot bootloader` 去「试探」BL 是否可用 —— 对「仅 FBD」设备那会
-        把它唯一的救命通道踢掉、彻底失联（深研报告红线）。
-      · 因此「BL 是否可进」只能靠用户声明（bl_declared_dead / bl_symptom）。
+      · 默认**纯只读**：不调用 reboot / flash / erase / set-active。
+      · **绝不**从 FastbootD 态发 `reboot bootloader` 去「试探」BL —— 对「仅 FBD」
+        设备那会把它唯一的救命通道踢掉、彻底失联（深研报告红线）。
+      · 唯一例外（且安全）：设备已确认在 **bootloader** 时，若 probe_fbd=True，
+        可 `reboot fastboot` 实测能否进入 FBD（进不去也只是留在/回到 BL，不失联）。
+        `super-partition-name` 在 bootloader 态固有 FAILED，不能据此判 FBD 坏。
 
     参数：
       adb/fb：可注入的 runner（便于测试与复用）；为 None 时按现状探测。
@@ -167,6 +170,8 @@ def diagnose_fbd(
       bl_symptom：用户声明的 bootloader 症状。INSTANT_EXIT（能进但秒退，
         典型 ColorOS 16/17 封 fastboot）→ 可用「在 FBD 内刷旧版 abl」救回
         bootloader（RESCUE_ABL）；CANNOT_ENTER 且 bl_declared_dead → FBD_ONLY。
+      probe_fbd：设备在 bootloader 时，是否实测「能否进 FBD」以判定 REPAIR_FBD
+        （需一次 reboot fastboot；仅在 bootloader 态生效，安全）。
 
     返回：FbdDiagnosis（含 state / recommendation / 人类可读 summary）。
     """
@@ -243,19 +248,68 @@ def diagnose_fbd(
                 "若 bootloader 秒退/进不去，请再跑一次并选择相应症状。"
             )
     elif state is FbdState.FASTBOOT:
-        # 已在 BL 说明 BL 可用；至于能否进 FBD，只读无法可靠判断（不敢 reboot 探）。
-        diag.recommendation = FbdRecommendation.NORMAL
-        diag.summary = (
-            "设备在 Fastboot（bootloader，说明 BL 可用）。"
-            "若线刷时进不了 FastbootD（卡住/超时），可用「修复 FastbootD」——"
-            "核心是刷回 recovery（fastbootd 寄生在 recovery 里）。"
-        )
-        diag.notes.append("提示：本诊断只读，不主动重启去测 FBD 可达性（避免误伤）。")
+        # 已在 BL 说明 BL 可用。可**安全地**探测 FBD 是否可达：
+        #   · 只有在 bootloader 态才允许 reboot fastboot 探测（BL 是好的，
+        #     进不去 FBD 也还留在 BL，不会失联）；**绝不从 FBD 态 reboot 探测**。
+        #   · 注意 `super-partition-name` 在 bootloader 态固有 FAILED（BL 不认识
+        #     super），不能据此判「fastbootd 坏」——必须实测能否进 FBD。
+        if probe_fbd and fb is not None:
+            reachable = _probe_fbd_reachable(fb, timeout=60.0)
+            if reachable:
+                diag.recommendation = FbdRecommendation.NORMAL
+                diag.summary = (
+                    "设备在 Fastboot（bootloader），且实测可正常进入 FastbootD。"
+                    "普通/强力线刷即可。"
+                )
+            else:
+                diag.recommendation = FbdRecommendation.REPAIR_FBD
+                diag.summary = (
+                    "设备在 bootloader，但实测【进不了 FastbootD】→ 建议「修复 FastbootD」："
+                    "核心是刷回 recovery.img（fastbootd 寄生在 recovery 里）。"
+                )
+                diag.notes.append(
+                    "仅「有独立 recovery 分区」的机型可刷 recovery；若 recovery 并入 "
+                    "boot/init_boot，应改刷 boot/init_boot（见恢复指南）。"
+                )
+                diag.notes.append("需要设备仍停留在 bootloader 或 FBD 才能继续修复。")
+        else:
+            diag.recommendation = FbdRecommendation.NORMAL
+            diag.summary = (
+                "设备在 Fastboot（bootloader，说明 BL 可用）。"
+                "若线刷时进不了 FastbootD（卡住/超时），可用「修复 FastbootD」——"
+                "核心是刷回 recovery（fastbootd 寄生在 recovery 里）。"
+            )
+            diag.notes.append("提示：未做 FBD 可达性实测（需允许一次 reboot fastboot 探测）。")
     else:
         diag.recommendation = FbdRecommendation.UNKNOWN
         diag.summary = "未检测到设备。请检查数据线 / USB 调试 / adb、fastboot 是否可用。"
 
     return diag
+
+
+def _probe_fbd_reachable(fb: FastbootRunner, timeout: float = 60.0) -> bool:
+    """从 bootloader 实测能否进入 FastbootD（**只在 bootloader 态调用**）。
+
+    安全性：bootloader 已确认可用，reboot fastboot 进不去也只是留在/回到 BL，
+    不会失联。**绝不能**在设备已在 FBD 时调用（那要 reboot bootloader，会踢掉
+    仅剩 FBD 设备的唯一通道）。
+    """
+    try:
+        fb.run("reboot", "fastboot", timeout=60)
+    except Exception:  # noqa: BLE001
+        return False
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        time.sleep(3)
+        try:
+            if not fb.devices():
+                continue
+            if fb.is_fastbootd():
+                return True
+            # 若已回到 bootloader（is-userspace=no）持续一段时间，说明进不了 FBD
+        except Exception:  # noqa: BLE001
+            continue
+    return False
 
 
 # --------------------------------------------------------------------------
@@ -1169,3 +1223,155 @@ def dry_run_report(plan: FlashPlan, image_dir: Path) -> str:
         lines.append("  ✓ 可以安全刷写")
 
     return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------
+# 修复 FastbootD（刷回 recovery）
+# --------------------------------------------------------------------------
+
+@dataclass
+class RepairFbdResult:
+    ok: bool = False
+    error: str = ""
+    flashed: bool = False          # 是否执行了 flash recovery
+    verified_fbd: bool = False     # 刷完后是否验证到 is-userspace=yes
+    warnings: list[str] = field(default_factory=list)
+    steps: list[str] = field(default_factory=list)
+
+
+def repair_fbd(
+    fb: FastbootRunner,
+    recovery_img: Path,
+    *,
+    package_info=None,
+    device_version: str | None = None,
+    device_model: str | None = None,
+    dry_run: bool = False,
+    on_notice: Callable[[str], None] | None = None,
+) -> RepairFbdResult:
+    """修复 FastbootD：把 recovery.img 刷回设备，让 fastbootd 重新可用。
+
+    机制（AOSP，见 docs/research/fastbootd-rescue-factcheck.md）：
+      fastbootd 的 HAL 打包在 recovery 镜像里 → recovery 坏了/丢了就进不去 FBD
+      → 刷回一个可用的 recovery.img 即可让 fastbootd 回来。
+
+    安全设计：
+      · 只有「能进 fastboot(bootloader)」时才做（本修复就是站在这条通道上）；
+      · 只刷 recovery 分区，**不碰 abl/xbl/ARB/persist/ocdt**；
+      · 刷错 recovery 的代价（据社区案例）= bootloop/卡 fastboot，可刷回，非硬砖；
+      · 版本不匹配只**警告不截断**（第三方 recovery 也可能可用）。
+
+    步骤：
+      1) 确认在 bootloader（is-userspace=no）
+      2) 实测能否进 FBD：能进 → 说明 FBD 没坏，无需修（返回 ok 但未刷）
+      3) 只读确认有恢复分区（partition-size:recovery 可读）
+      4) 版本比对（尽力而为，不匹配仅警告）
+      5) flash recovery → reboot fastboot → 验证 is-userscript=yes
+
+    返回 RepairFbdResult。
+    """
+    res = RepairFbdResult()
+
+    def note(msg: str) -> None:
+        res.steps.append(msg)
+        if on_notice:
+            on_notice(msg)
+
+    # 1) 确认在 bootloader
+    try:
+        if fb.is_fastbootd():
+            res.error = "设备当前在 FastbootD 而非 bootloader。请先在 bootloader 下执行本修复。"
+            return res
+    except Exception:  # noqa: BLE001
+        pass
+
+    # 2) 实测 FBD 是否真坏（能进就不用修）
+    reachable = _probe_fbd_reachable(fb, timeout=45.0)
+    if reachable:
+        note("实测：设备可正常进入 FastbootD —— fastbootd 没坏，无需修复。")
+        res.ok = True
+        res.verified_fbd = True
+        return res
+    note("实测：设备进不了 FastbootD —— 确认需要修复（刷回 recovery）。")
+
+    # 回到 bootloader 再刷（probe 可能把设备留在别处）
+    try:
+        if not fb.devices() or fb.is_fastbootd():
+            fb.run("reboot", "bootloader", timeout=60)
+            time.sleep(3)
+    except Exception:  # noqa: BLE001
+        pass
+
+    # 3) 确认有恢复分区
+    try:
+        psize = fb.getvar("partition-size:recovery")
+        has_recovery = bool(psize)
+    except Exception:  # noqa: BLE001
+        has_recovery = False
+    if not has_recovery:
+        res.error = (
+            "未检测到独立的 recovery 分区。部分一加机型 recovery 并入 boot/init_boot，"
+            "此时 flash recovery 无效，应改刷 boot/init_boot（见恢复指南）——本修复不支持，已中止。"
+        )
+        note(res.error)
+        return res
+    note(f"检测到 recovery 分区（size={psize}）。")
+
+    # 4) 版本比对（尽力而为，不匹配只警告）
+    if not recovery_img.exists():
+        res.error = f"recovery 镜像不存在：{recovery_img}"
+        return res
+    if package_info is not None and device_version:
+        pkg_ver = getattr(package_info, "display_os_version", None) or getattr(
+            package_info, "build_incremental", None
+        )
+        if pkg_ver and device_version and str(pkg_ver) not in str(device_version) \
+                and str(device_version) not in str(pkg_ver):
+            res.warnings.append(
+                f"recovery 镜像来自包版本 {pkg_ver}，与设备报告的版本 {device_version} 不一致。"
+                "建议用『同设备同版本』官方全量包里的 recovery.img；若坚持用当前镜像，"
+                "第三方/不同版本 recovery 也可能可用，但失败风险更高。"
+            )
+    else:
+        res.warnings.append(
+            "无法核实在 fastboot 侧读取设备版本（bootloader 读不到版本号）；"
+            "请自行确认此 recovery.img 与设备固件版本匹配。"
+        )
+    for w in res.warnings:
+        note("⚠ " + w)
+
+    if dry_run:
+        note("[预演] 将执行：fastboot flash recovery <recovery.img> 后 reboot fastboot 验证。")
+        res.ok = True
+        return res
+
+    # 5) 刷 recovery
+    slot = None
+    try:
+        slot = fb.getvar("current-slot")
+    except Exception:  # noqa: BLE001
+        pass
+    note(f"刷入 recovery（当前槽 {slot}）…")
+    r = fb.run("flash", "recovery", str(recovery_img), timeout=300)
+    if not fb.ok(r):
+        res.error = f"flash recovery 失败：{_extract_error(r)}"
+        note(res.error)
+        note("提示：刷错/不匹配的 recovery 一般不会硬砖（bootloader 仍在），可换正确版本 recovery 重刷。")
+        return res
+    res.flashed = True
+    note("✓ recovery 已刷入。")
+
+    # 6) reboot fastboot 验证
+    note("正在 reboot fastboot 验证 fastbootd…")
+    if _probe_fbd_reachable(fb, timeout=90.0):
+        res.ok = True
+        res.verified_fbd = True
+        note("✓ FastbootD 已恢复（is-userspace=yes）。修复成功。")
+    else:
+        res.error = "recovery 已刷入，但仍未能进入 FastbootD。"
+        note(res.error)
+        note(
+            "可尝试：①换匹配版本的官方 recovery 再刷；②第三方 recovery（橙狐/TWRP）；"
+            "③若 recovery 无独立分区需改刷 boot/init_boot；④仍不行 → EDL 整包。"
+        )
+    return res
