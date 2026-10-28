@@ -351,15 +351,29 @@ def test_recreate_deletes_cow_partitions(tmp_path):
     assert any("-cow" in d for d in deleted)
 
 
-def test_recreate_creates_both_slots(tmp_path):
-    plan = make_plan(tmp_path)
+def test_recreate_creates_only_target_slot(tmp_path):
+    """只重建目标槽，避免 _a/_b 双份占满 super（2× 空间会导致 resize 不足）。"""
+    plan = make_plan(tmp_path)  # plan.slot 默认 _a
     fb = FakeFastboot()
     ex = make_executor(plan, tmp_path, fb)
     ex.run()
 
     created = [c[1] for c in fb.calls if c and c[0] == "create-logical-partition"]
-    assert any(c.endswith("_a") for c in created)
-    assert any(c.endswith("_b") for c in created)
+    assert any(c.endswith("_a") for c in created)      # 目标槽建了
+    assert not any(c.endswith("_b") for c in created)  # 另一槽不建（省空间）
+
+
+def test_recreate_deletes_both_slots_and_cow(tmp_path):
+    """删除时仍清两槽 + COW 残留，只是创建只建目标槽。"""
+    plan = make_plan(tmp_path)
+    fb = FakeFastboot()
+    ex = make_executor(plan, tmp_path, fb)
+    ex.run()
+
+    deleted = [c[1] for c in fb.calls if c and c[0] == "delete-logical-partition"]
+    assert any(c.endswith("_a") for c in deleted)
+    assert any(c.endswith("_b") for c in deleted)
+    assert any("-cow" in c for c in deleted)
 
 
 def test_no_recreate_when_disabled(tmp_path):
@@ -622,3 +636,18 @@ def test_no_target_slot_no_set_active(tmp_path):
     ex = make_executor(plan, tmp_path, fb)
     ex.run()
     assert not any("--set-active" in str(c) for c in fb.calls)
+
+
+# -- 空间不足（resize）恢复提示 -----------------------------------------
+
+def test_recovery_hint_suggests_strong_mode_on_resize_failure():
+    """FastbootD 阶段 resize 不足时，提示应引导改用强力线刷重建。"""
+    from lrom.core.flash import _recovery_hint
+
+    hint = _recovery_hint(
+        "odm", Phase.FASTBOOTD, "FAILED (remote: 'Not enough space to resize partition')"
+    )
+    assert "强力线刷" in hint
+    # 普通 fastboot 分区的提示不应被这条规则误伤
+    plain = _recovery_hint("boot", Phase.FASTBOOT, "whatever")
+    assert "强力线刷" not in plain

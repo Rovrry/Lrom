@@ -11,9 +11,42 @@ from __future__ import annotations
 import os
 import sys
 import time
+from enum import Enum
 from pathlib import Path
 
 from .. import __version__
+
+
+class FlashMode(Enum):
+    """线刷模式（决定槽位与是否重建逻辑分区）。
+
+    · NORMAL：只刷当前槽，不重建逻辑分区（常规升级/降级）。
+    · STRONG：只刷当前槽，强制重建逻辑分区（修 super/COW/刷写异常）。
+    · RELOCK：刷到另一槽，防 A/B 槽不一致（回锁前把两槽洗回原厂）。
+    """
+
+    NORMAL = "normal"
+    STRONG = "strong"
+    RELOCK = "relock"
+
+    @property
+    def label(self) -> str:
+        return {
+            FlashMode.NORMAL: "普通线刷",
+            FlashMode.STRONG: "强力线刷",
+            FlashMode.RELOCK: "回锁线刷",
+        }[self]
+
+    @property
+    def to_opposite_slot(self) -> bool:
+        return self is FlashMode.RELOCK
+
+    @property
+    def recreate_logical(self) -> bool:
+        # 强力线刷强制重建逻辑分区；回锁线刷也要重建（否则大镜像直接覆盖
+        # 会触发 super 内 resize 不足，如 my_stock 3.8GB）；普通线刷按紫罗兰
+        # 「普通模式」语义不重建（直接覆盖，必要时失败会提示改用强力线刷）。
+        return self is not FlashMode.NORMAL
 
 
 # ---------------------------------------------------------------------------
@@ -292,8 +325,8 @@ def build_menu(sess: "Session", env_ok: bool) -> str:
     lines = [
         f"  {_color('─ 刷写流程 ────────────────────────────────────', d)}",
         f"   {_color('1', C.CYAN)}) 解全量包          选择 ROM 包并解出镜像",
-        f"   {_color('2', C.CYAN)}) 预演检查          ★ 不写设备，预演「刷到另一槽」",
-        f"   {_color('3', C.CYAN)}) 线刷全量包        刷到另一槽（自动切槽）",
+        f"   {_color('2', C.CYAN)}) 预演检查          ★ 不写设备，选模式后预演",
+        f"   {_color('3', C.CYAN)}) 线刷全量包        选模式：普通 / 强力 / 回锁",
         f"   {_color('4', C.CYAN)}) 只刷指定分区      手动选择分区",
         "",
         f"  {_color('─ 安全 ────────────────────────────────────────', d)}",
@@ -610,8 +643,8 @@ def run_menu() -> int:
 
     handlers = {
         "1": _flow_unpack,
-        "2": lambda s_, m: _flow_flash(s_, m, dry_run=True, to_opposite_slot=True),
-        "3": lambda s_, m: _flow_flash(s_, m, dry_run=False, to_opposite_slot=True),
+        "2": lambda s_, m: _flow_flash(s_, m, dry_run=True),
+        "3": lambda s_, m: _flow_flash(s_, m, dry_run=False),
         "4": lambda s_, m: _flow_flash(s_, m, dry_run=False, pick=True),
         "5": _menu_backup,
         "6": _menu_arb,
@@ -839,9 +872,53 @@ def _flow_unpack(sess: Session, mon) -> None:
     pause()
 
 
+def _choose_flash_mode(dry_run: bool) -> "FlashMode | None":
+    """让用户选择线刷模式（普通 / 强力 / 回锁）。
+
+    三档的区别：
+      · 普通线刷：只刷**当前激活槽**，**不重建**逻辑分区（直接覆盖，对应紫罗兰
+        「普通模式」；大镜像空间不足时会提示改用强力线刷）。
+      · 强力线刷：只刷**当前激活槽**，但**强制 delete/create 重建**逻辑分区，
+        用于 super/COW 异常、逻辑分区刷写失败等（对应紫罗兰「强力线刷」）。
+      · 回锁线刷：刷到**另一个槽**，并**重建逻辑分区**，用于配合回锁前把两槽都
+        洗回原厂（防止 A/B 槽不一致）。
+
+    返回 FlashMode；用户取消则返回 None。
+    """
+    print()
+    title = "请选择线刷模式" + ("（预演，不写设备）" if dry_run else "")
+    print(f"  {_color(title, C.BOLD)}：")
+    print()
+    print(
+        f"    {_color('1', C.CYAN)}) 普通线刷   "
+        f"{_color('只刷当前槽，不重建逻辑分区（常规升级/降级）', C.DIM)}"
+    )
+    print(
+        f"    {_color('2', C.CYAN)}) 强力线刷   "
+        f"{_color('只刷当前槽，强制重建逻辑分区（修 super/刷写异常）', C.DIM)}"
+    )
+    print(
+        f"    {_color('3', C.CYAN)}) 回锁线刷   "
+        f"{_color('刷到另一槽，防 A/B 槽不一致（回锁前用）', C.DIM)}"
+    )
+    print(f"    {_color('0', C.CYAN)}) 返回上级")
+    print()
+    while True:
+        ans = ask("请选择", "").strip().lower()
+        if ans in ("", "q", "quit", "exit", "0"):
+            print(f"  {_color('已取消，返回主菜单', C.DIM)}")
+            return None
+        if ans == "1":
+            return FlashMode.NORMAL
+        if ans == "2":
+            return FlashMode.STRONG
+        if ans == "3":
+            return FlashMode.RELOCK
+        print(f"  {_color('输入无效，请重新选择', C.YELLOW)}")
+
+
 def _flow_flash(
     sess: Session, mon, *, dry_run: bool, pick: bool = False,
-    to_opposite_slot: bool = False,
 ) -> None:
     import argparse
 
@@ -864,6 +941,15 @@ def _flow_flash(
         pause()
         return
 
+    # 选线刷模式（只刷指定分区时不需要模式，直接用普通默认：当前槽、不重建）
+    mode: FlashMode = FlashMode.NORMAL
+    if not pick:
+        chosen = _choose_flash_mode(dry_run)
+        if chosen is None:
+            pause()
+            return
+        mode = chosen
+
     ns = argparse.Namespace(
         package=sess.package,
         images=str(sess.image_dir),
@@ -875,15 +961,16 @@ def _flow_flash(
         no_reboot=True,
         wipe=False,
         both_slots=False,
-        no_recreate_logical=False,
+        # 普通/回锁不重建逻辑分区；强力线刷强制重建
+        no_recreate_logical=not mode.recreate_logical,
         adb_port=None,
-        to_opposite_slot=to_opposite_slot,
+        to_opposite_slot=mode.to_opposite_slot,
         slot=None,
     )
 
     if dry_run:
         print()
-        print(_color("  预演检查：只看能不能刷，不写入任何数据。", C.BOLD))
+        print(_color(f"  模式：{mode.label}（预演，不写入任何数据）", C.BOLD))
         print(_color("  输入 q 可取消", C.DIM))
         print()
         cmd_flash(ns)
@@ -924,6 +1011,23 @@ def _flow_flash(
         return
     if ans.strip().lower() in ("y", "yes", "是"):
         ns.wipe = True
+
+    # 打印本模式的关键差异，避免用户误判（尤其回锁线刷会切槽）
+    print()
+    print(f"  {_color('已选模式：', C.BOLD)}{mode.label}")
+    if mode is FlashMode.RELOCK:
+        print(
+            _color(
+                "    · 将刷到【另一个槽】并切换活动槽，同时重建逻辑分区；"
+                "回锁前需连刷两次把两槽都洗回原厂",
+                C.YELLOW,
+            )
+        )
+    elif mode is FlashMode.STRONG:
+        print(_color("    · 将强制 delete/create 重建逻辑分区（修 super/COW 异常）", C.YELLOW))
+    else:
+        print(_color("    · 只刷当前激活槽，不重建逻辑分区（大镜像若空间不足请改用强力线刷）", C.DIM))
+    print()
 
     cmd_flash(ns)
     pause()
@@ -1080,8 +1184,9 @@ def _menu_relock(sess: "Session", mon) -> None:
     """菜单 14：BL 回锁（高风险）。
 
     前提：两个槽的关键分区都必须是原厂签名镜像。
-    「线刷全量包」（菜单 3）现在默认刷到**另一个槽**，所以用户跑两次
-    菜单 3（每次自动切槽）即可保证两槽都刷了原厂包。刷完后用本菜单回锁。
+    「线刷全量包」（菜单 3）现提供「回锁线刷」模式，会刷到**另一个槽**
+    并切换活动槽。连刷两次（每次自动切到另一槽）即可保证两槽都洗回
+    原厂包。刷完后用本菜单回锁。
 
     交互：
       1) 我已线刷/安装好两个槽，直接回锁
@@ -1101,8 +1206,8 @@ def _menu_relock(sess: "Session", mon) -> None:
     print(f"  {_color('回锁会清空全部用户数据。', C.YELLOW)}")
     print()
     print("  如何保证两槽都是原厂：")
-    print(f"    · 用菜单 3「线刷全量包」刷两次——它会自动刷到另一个槽，")
-    print(f"      每次刷完活动槽切换，两次之后两槽都是这次刷的原厂包。")
+    print(f"    · 用菜单 3「线刷全量包」选「回锁线刷」模式刷两次——它会自动刷到")
+    print(f"      另一个槽，每次刷完活动槽切换，两次之后两槽都是这次刷的原厂包。")
     print(f"    · 或你已在设备本地安装过两次系统 ROM。")
     print()
     print("  请选择方式：")

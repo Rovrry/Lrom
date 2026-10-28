@@ -205,7 +205,20 @@ def preflight(
 # 执行
 # --------------------------------------------------------------------------
 
-def _recovery_hint(part: str, phase: Phase) -> str:
+def _recovery_hint(part: str, phase: Phase, msg: str = "") -> str:
+    # FastbootD 阶段出现空间不足（resize 失败），最常见的成因是「没有重建
+    # 逻辑分区、直接覆盖」时目标镜像比原分区大。此时正确做法是改用
+    # 「强力线刷」（delete/create 重建逻辑分区），而不是重试同一条命令。
+    low = msg.lower()
+    if phase is Phase.FASTBOOTD and (
+        "not enough space" in low or "resize partition" in low
+    ):
+        return (
+            f"{part}: super 空间不足（多为未重建逻辑分区直接覆盖大镜像）\n"
+            f"      → 改用「强力线刷」模式（会先 delete/create 重建逻辑分区），"
+            f"或手动：fastboot reboot fastboot 后 "
+            f"fastboot delete-logical-partition {part} 再重刷"
+        )
     if phase is Phase.FASTBOOT:
         return f"fastboot flash {part} {part}.img"
     return f"fastboot flash {part} {part}.img   # 需先 fastboot reboot fastboot"
@@ -341,7 +354,7 @@ class FlashExecutor:
             duration=duration,
             size=size,
             message=msg,
-            recovery_hint=_recovery_hint(op.partition, op.phase),
+            recovery_hint=_recovery_hint(op.partition, op.phase, msg),
         )
 
     def _tick_progress(
@@ -418,10 +431,17 @@ class FlashExecutor:
 
         为什么需要：直接 flash 一个逻辑分区时，若目标分区不存在或容量不足会失败；
         另外虚拟 A/B 的 COW 快照层（xxx_a-cow）会残留旧数据。
-        做法参照 Universal_Flasher：
-          delete-logical-partition <name>_a / _b / _a-cow / _b-cow
-          create-logical-partition <name>_a <size_blocks>
-          create-logical-partition <name>_b <size_blocks>
+
+        关键：**只重建目标槽**（当前要写入的那个槽，如 _a）。
+        原因——super 是单个物理分区，两个槽的逻辑分区共用同一空间。
+        若 _a/_b 都按镜像尺寸 create，空间需求翻倍，反而会触发
+        "Not enough space to resize partition"。而 Lrom 刷的是当前槽的裸名
+        （fastboot flash odm 落到 odm_<当前槽>），根本不会写另一槽，
+        所以另一槽的副本纯属浪费空间，不建。
+
+        做法参照 Universal_Flasher（delete 后按镜像字节数换算块数 create）：
+          delete-logical-partition <name>_<目标槽> [-cow] [<name>_<另一槽> ...]
+          create-logical-partition <name>_<目标槽> <size_blocks>
         """
         assert self.fb is not None
         if not op.size:
@@ -432,20 +452,24 @@ class FlashExecutor:
         if base.endswith(("_a", "_b")):
             base = base[:-2]
 
+        target_suffix = self._target_slot_suffix()  # 如 "_a"
+        other_suffix = "_b" if target_suffix == "_a" else "_a"
+        target = f"{base}{target_suffix}"
+        other = f"{base}{other_suffix}"
+
         size_blocks = max(1, op.size // 4096)
         errors: list[str] = []
 
-        # 删除所有 4 种命名（已存在则删，不存在会报错，忽略）
-        for name in (f"{base}_a", f"{base}_b", f"{base}_a-cow", f"{base}_b-cow"):
+        # 删除旧的（含两槽的普通分区与 COW 层），释放空间；不存在会报错，忽略
+        for name in (target, other, f"{target}-cow", f"{other}-cow"):
             self.fb.run("delete-logical-partition", name, timeout=60)
 
-        # 重建两个槽位的逻辑分区
-        for name in (f"{base}_a", f"{base}_b"):
-            res = self.fb.run(
-                "create-logical-partition", name, str(size_blocks), timeout=120
-            )
-            if not self.fb.ok(res):
-                errors.append(f"create {name}: {_extract_error(res)}")
+        # 只重建目标槽（另一槽不写，不占空间）
+        res = self.fb.run(
+            "create-logical-partition", target, str(size_blocks), timeout=120
+        )
+        if not self.fb.ok(res):
+            errors.append(f"create {target}: {_extract_error(res)}")
 
         if errors:
             return " ; ".join(errors[:2])
@@ -456,9 +480,10 @@ class FlashExecutor:
         if base.endswith(("_a", "_b")):
             base = base[:-2]
         blocks = max(1, op.size // 4096)
+        target = f"{base}{self._target_slot_suffix()}"
         return (
-            f"fastboot create-logical-partition {base}_a {blocks} 然后 "
-            f"fastboot flash {base}_a {base}.img"
+            f"fastboot create-logical-partition {target} {blocks} 然后 "
+            f"fastboot flash {base} {base}.img"
         )
 
     # -- 双槽刷写 -----------------------------------------------------

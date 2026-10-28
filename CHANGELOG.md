@@ -2,6 +2,47 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.7.8-rc1] - 2026-10-28
+
+### 改进：线刷模式拆成三档（普通 / 强力 / 回锁）
+
+**背景**：v0.7.3/v0.7.4 为配合 BL 回锁的「平刷两槽」，把菜单 3
+「线刷全量包」硬编码成**默认刷到另一个槽**。这对回锁场景合适，但对
+日常升级/降级是反直觉的（用户只想刷当前槽，却被切走）。现改回
+「先选模式」：
+
+```
+1) 普通线刷   只刷当前槽，不重建逻辑分区（常规升级/降级）
+2) 强力线刷   只刷当前槽，强制重建逻辑分区（修 super/COW/刷写异常）
+3) 回锁线刷   刷到另一槽，重建逻辑分区，防 A/B 槽不一致（回锁前洗原厂用）
+```
+
+- **普通线刷**：`to_opposite_slot=False` + `no_recreate_logical=True`，
+  当前槽、不重建。对应紫罗兰「普通模式」（它同样是直接覆盖）。
+  注意：镜像比原分区大时可能触发 `Not enough space to resize partition`，
+  此时会提示改用「强力线刷」。
+- **强力线刷**：`to_opposite_slot=False` + `no_recreate_logical=False`，
+  强制 delete/create 重建逻辑分区。对应紫罗兰「强力线刷」。
+- **回锁线刷**：`to_opposite_slot=True` + `no_recreate_logical=False`，
+  刷到另一槽并切活动槽，**并重建逻辑分区**（否则大镜像如 my_stock 3.8GB
+  直接覆盖会 resize 不足、刷写失败——v0.7.8 开发中实机踩到并修正）。
+  连刷两次即可把两槽都洗回原厂，供回锁使用。
+
+**修复（重要）：逻辑分区重建只建目标槽**
+
+原 `_recreate_logical_partition` 把 `<name>_a` **和** `<name>_b` 都按镜像
+尺寸 create，空间需求翻倍（≈2×），在 super 空间紧张时会自己触发
+`Not enough space to resize partition`。而 Lrom 刷的是当前槽的裸名
+（`fastboot flash odm` 落到 `odm_<当前槽>`），另一槽副本根本不会被写入，
+纯属浪费空间。现改为**只 delete 两槽 + 只 create 目标槽**，空间需求减半，
+与 preflight 的 super 空间校验口径一致。
+
+菜单 2「预演检查」同步改为选模式后预演；菜单 4「只刷指定分区」不变
+（当前槽、普通默认）。回锁菜单的引导文案同步更新为「选回锁线刷模式」。
+
+测试 393 -> 403（新增 test_flash_modes.py 锁三档映射；新增「只建目标槽」
+及 resize 失败提示的回归测试）。
+
 ## [0.7.7] - 2026-10-28
 
 ### 新增：BL 解锁（`lrom unlock` / 菜单 14）
