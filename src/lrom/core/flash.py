@@ -84,6 +84,181 @@ class FlashAborted(Exception):
 
 
 # --------------------------------------------------------------------------
+# FastbootD 只读诊断（救砖分流）
+# --------------------------------------------------------------------------
+
+class FbdState(Enum):
+    """设备当前所处模式。"""
+
+    ADB = "adb"            # 已开机进系统
+    FASTBOOT = "fastboot"  # bootloader
+    FASTBOOTD = "fastbootd"  # 用户空间 fastbootd
+    NONE = "none"          # 没检测到
+
+
+class FbdRecommendation(Enum):
+    """诊断结论 —— 该走哪条刷写路径的「建议」（不是自动执行）。"""
+
+    NORMAL = "normal"          # 模式正常，走普通/强力线刷即可
+    REPAIR_FBD = "repair_fbd"  # 能进 BL、进不了 FBD → 建议「修复 FastbootD」（核心=刷 recovery）
+    FBD_ONLY = "fbd_only"      # 只剩 FBD、BL 永久不可用 → 「仅 FastbootD」（禁碰 BL）
+    RESCUE_ABL = "rescue_abl"  # BL 秒退/进不去但 FBD 可用 → 用 FBD 刷旧 abl 救回 bootloader
+    UNKNOWN = "unknown"        # 信息不足，无法判断，给排查建议
+
+
+class BlSymptom(Enum):
+    """用户声明的 bootloader 症状（只读诊断无法自动判定，必须问用户）。"""
+
+    NONE = "none"                    # bootloader 正常
+    CANNOT_ENTER = "cannot_enter"    # 完全进不了 bootloader
+    INSTANT_EXIT = "instant_exit"    # 能进但秒退（ColorOS 封 fastboot 典型症状）
+
+
+@dataclass
+class FbdDiagnosis:
+    """FastbootD 只读诊断结果。**不写设备、不重启**，纯读取。"""
+
+    state: FbdState
+    is_fastbootd: bool = False
+    current_slot: str | None = None
+    product: str | None = None
+    recommendation: FbdRecommendation = FbdRecommendation.UNKNOWN
+    summary: str = ""
+    notes: list[str] = field(default_factory=list)
+
+    def to_lines(self) -> list[str]:
+        lines = [f"设备模式: {self.state.value}" + ("（FastbootD 用户空间）" if self.is_fastbootd else "")]
+        if self.current_slot:
+            lines.append(f"当前槽位: _{self.current_slot}")
+        if self.product:
+            lines.append(f"平台/产品: {self.product}")
+        lines.append(f"诊断结论: {self.recommendation.value}")
+        if self.summary:
+            lines.append(f"说明: {self.summary}")
+        for n in self.notes:
+            lines.append(f"  · {n}")
+        return lines
+
+
+def diagnose_fbd(
+    *,
+    adb: AdbRunner | None = None,
+    fb: FastbootRunner | None = None,
+    bl_declared_dead: bool = False,
+    bl_symptom: "BlSymptom" = None,  # type: ignore[assignment]
+) -> FbdDiagnosis:
+    """只读诊断设备处于哪种刷写场景，给出「该走哪条路」的建议。
+
+    这是「仅 FastbootD / 修复 FastbootD / 刷旧 abl 救 bootloader」几条救砖
+    路径的分流探针（对齐紫罗兰用 getvar is-userspace 作为分流根节点的做法；
+    机制依据：fastbootd 的 HAL 打包在 recovery 镜像里，见 docs/research/
+    fastbootd-rescue-factcheck.md 与 AOSP Move fastboot to userspace）。
+
+    设计铁律（安全）：
+      · **纯只读**：绝不调用 reboot / flash / erase / set-active 等任何写/重启命令。
+      · 绝不发 `reboot bootloader` 去「试探」BL 是否可用 —— 对「仅 FBD」设备那会
+        把它唯一的救命通道踢掉、彻底失联（深研报告红线）。
+      · 因此「BL 是否可进」只能靠用户声明（bl_declared_dead / bl_symptom）。
+
+    参数：
+      adb/fb：可注入的 runner（便于测试与复用）；为 None 时按现状探测。
+      bl_declared_dead：用户/历史是否已声明「这台机进不了 bootloader」
+        （丢 OCDT / 格机 / 换主板，永久不可用）。FBD_ONLY 判定的关键输入。
+      bl_symptom：用户声明的 bootloader 症状。INSTANT_EXIT（能进但秒退，
+        典型 ColorOS 16/17 封 fastboot）→ 可用「在 FBD 内刷旧版 abl」救回
+        bootloader（RESCUE_ABL）；CANNOT_ENTER 且 bl_declared_dead → FBD_ONLY。
+
+    返回：FbdDiagnosis（含 state / recommendation / 人类可读 summary）。
+    """
+    if bl_symptom is None:
+        bl_symptom = BlSymptom.NONE
+
+    # -- 1) 判定当前模式（只读）--
+    state = FbdState.NONE
+    is_fbd = False
+
+    if adb is not None:
+        try:
+            for _s, st in adb.devices().items():
+                if st == "device":
+                    state = FbdState.ADB
+                    break
+        except Exception:  # noqa: BLE001
+            pass
+
+    if state is FbdState.NONE and fb is not None:
+        try:
+            if fb.devices():
+                is_fbd = fb.is_fastbootd()
+                state = FbdState.FASTBOOTD if is_fbd else FbdState.FASTBOOT
+        except Exception:  # noqa: BLE001
+            pass
+
+    diag = FbdDiagnosis(state=state, is_fastbootd=is_fbd)
+
+    # -- 2) 只读补一些上下文（拿不到就跳过，不报错）--
+    if fb is not None and state in (FbdState.FASTBOOT, FbdState.FASTBOOTD):
+        try:
+            slot = fb.getvar("current-slot")
+            if slot:
+                diag.current_slot = slot.lstrip("_")
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            diag.product = fb.getvar("product")
+        except Exception:  # noqa: BLE001
+            pass
+
+    # -- 3) 分流判断 --
+    if state is FbdState.ADB:
+        diag.recommendation = FbdRecommendation.NORMAL
+        diag.summary = "设备已开机进系统，无需救砖。要刷机请先进 fastboot/fastbootd。"
+    elif state is FbdState.FASTBOOTD:
+        if bl_symptom is BlSymptom.INSTANT_EXIT:
+            # ColorOS 16/17 封 fastboot 典型症状：能进 BL 但秒退；但 FBD 还能进。
+            # 救法：在 FBD 内刷「旧版本、当前槽」的 abl 即可找回 bootloader。
+            diag.recommendation = FbdRecommendation.RESCUE_ABL
+            diag.summary = (
+                "设备在 FastbootD，且你描述 bootloader 会「秒退」（典型 ColorOS 16/17 "
+                "封堵 fastboot）→ 建议用【FastbootD 刷旧版 abl】救回 bootloader："
+                "只刷当前槽 abl_a（版本必须对得上、且 abl 可回退）。"
+            )
+            diag.notes.append(
+                "风险：各机型 abl 不通用（如一加13 用 C.93、13T 用 C.58），"
+                "用错版本=黑砖；ARB 熔断/新 abl 锁死的机型此路不通。"
+            )
+            diag.notes.append("只刷当前槽 abl_a，不要切槽、不要动 B 槽、不要刷 ocdt/persist。")
+        elif bl_declared_dead:
+            diag.recommendation = FbdRecommendation.FBD_ONLY
+            diag.summary = (
+                "设备已在 FastbootD 且你声明无法进入 Bootloader → "
+                "建议【仅 FastbootD】模式：只在 FBD 内重建并刷 super 逻辑分区，"
+                "**绝不写 bootloader 侧**。"
+            )
+            diag.notes.append("铁律：本模式全程不发 reboot bootloader / 不写 abl/xbl/ocdt 等 BL 侧分区。")
+        else:
+            diag.recommendation = FbdRecommendation.NORMAL
+            diag.summary = (
+                "设备在 FastbootD。若你能正常进 Bootloader，可走普通线刷；"
+                "若 bootloader 秒退/进不去，请再跑一次并选择相应症状。"
+            )
+    elif state is FbdState.FASTBOOT:
+        # 已在 BL 说明 BL 可用；至于能否进 FBD，只读无法可靠判断（不敢 reboot 探）。
+        diag.recommendation = FbdRecommendation.NORMAL
+        diag.summary = (
+            "设备在 Fastboot（bootloader，说明 BL 可用）。"
+            "若线刷时进不了 FastbootD（卡住/超时），可用「修复 FastbootD」——"
+            "核心是刷回 recovery（fastbootd 寄生在 recovery 里）。"
+        )
+        diag.notes.append("提示：本诊断只读，不主动重启去测 FBD 可达性（避免误伤）。")
+    else:
+        diag.recommendation = FbdRecommendation.UNKNOWN
+        diag.summary = "未检测到设备。请检查数据线 / USB 调试 / adb、fastboot 是否可用。"
+
+    return diag
+
+
+# --------------------------------------------------------------------------
 # 前置检查
 # --------------------------------------------------------------------------
 
@@ -254,6 +429,7 @@ class FlashExecutor:
         both_slots: bool = False,
         recreate_logical: bool = True,
         target_slot: str | None = None,
+        fbd_only: bool = False,
     ) -> None:
         self.plan = plan
         self.image_dir = image_dir
@@ -272,6 +448,10 @@ class FlashExecutor:
         #: 若指定，进 fastboot 后先 set-active 到该槽再刷（物理分区是裸名，
         #: 落哪个槽由当前激活槽决定）。用于「刷到另一个槽」。
         self.target_slot = target_slot
+        #: 「仅 FastbootD」救砖模式：设备进不了 bootloader、只剩 FBD。
+        #: 此时**绝不**把设备踢回 bootloader（那会断掉唯一救命通道），
+        #: 且**只跑 FASTBOOTD 阶段**、跳过 FASTBOOT 阶段。
+        self.fbd_only = fbd_only
         self.result = FlashResult(plan=plan)
         self._stop = False
 
@@ -542,6 +722,13 @@ class FlashExecutor:
     def run(self) -> FlashResult:
         self.result.started_at = time.time()
 
+        # ---- 「仅 FastbootD」救砖分支 ----
+        # 设备进不了 bootloader、只剩 FBD。绝不能 _ensure_fastboot()（那会
+        # fastboot reboot bootloader 把唯一救命通道踢掉），也不跑 FASTBOOT 阶段，
+        # 只在 FBD 内刷逻辑分区。见 docs/research/violet-fbd-only-deep.md。
+        if self.fbd_only:
+            return self._run_fbd_only()
+
         # ---- 步骤 0：确保设备处于 Fastboot 模式 ----
         # 设备可能处于 ADB（开机）、已是 Fastboot，或 FastbootD。
         # 必须先统一到 Fastboot，否则所有 fastboot flash 都会失败。
@@ -594,6 +781,64 @@ class FlashExecutor:
 
         self.result.finished_at = time.time()
         return self.result
+
+    def _run_fbd_only(self) -> FlashResult:
+        """「仅 FastbootD」执行：只刷逻辑分区，绝不触碰 bootloader 侧。
+
+        前置（安全红线）：
+          · 设备必须**已在 FastbootD**（is-userspace=yes）。绝不应由本方法
+            主动 reboot 去切模式——那可能断掉唯一救命通道。
+          · 计划里不允许出现任何 FASTBOOT 阶段分区（物理/引导链）；出现即拒绝，
+            防止误把 bootloader 侧分区刷进坏 BL 的设备。
+        """
+        # 1) 计划里绝不能有 FASTBOOT 阶段分区
+        bl_ops = [op for op in self.plan.active_ops if op.phase is Phase.FASTBOOT]
+        if bl_ops:
+            names = ", ".join(op.partition for op in bl_ops[:6])
+            self.result.error = (
+                f"仅 FastbootD 模式禁止刷 bootloader 侧分区（{names} 等 "
+                f"{len(bl_ops)} 个）。请只选择逻辑分区。已中止以防二次变砖。"
+            )
+            self.result.finished_at = time.time()
+            return self.result
+
+        # 2) 确认设备已在 FastbootD（只读 getvar，不 reboot）
+        if not self.dry_run:
+            assert self.fb is not None
+            try:
+                in_fbd = bool(self.fb.devices()) and self.fb.is_fastbootd()
+            except Exception:  # noqa: BLE001
+                in_fbd = False
+            if not in_fbd:
+                if self.on_notice:
+                    self.on_notice(
+                        "仅 FastbootD 模式要求设备已处于 FastbootD（is-userspace=yes），"
+                        "但当前未检测到。\n"
+                        "  请先手动让设备进入 FastbootD 后重试；本模式不会替你 reboot，"
+                        "以免断掉唯一可用的通道。"
+                    )
+                self.result.error = "设备不在 FastbootD 模式，仅 FastbootD 刷写已中止"
+                self.result.finished_at = time.time()
+                return self.result
+
+        # 3) 只跑 FASTBOOTD 阶段
+        self._notify_mode(Phase.FASTBOOTD)
+        if not self._run_phase(Phase.FASTBOOTD):
+            self.result.finished_at = time.time()
+            if not self.result.aborted:
+                self.result.error = "FastbootD 阶段失败，已中止"
+            return self.result
+
+        # 4) 清用户数据（可选，同样在 FBD 之后）
+        if self.wipe_data and not self.dry_run:
+            if not self._wipe_userdata():
+                self.result.error = "清空用户数据失败，已中止"
+                self.result.finished_at = time.time()
+                return self.result
+
+        self.result.finished_at = time.time()
+        return self.result
+
 
     def _wipe_userdata(self) -> bool:
         """清空用户数据（等同恢复出厂设置）。

@@ -343,10 +343,11 @@ def build_menu(sess: "Session", env_ok: bool) -> str:
         f"   {_color('11', C.CYAN)}) 重启设备          到 Fastboot / FastbootD / 系统",
         f"   {_color('12', C.CYAN)}) 环境自检          重新检查 adb / udev / 权限",
         f"   {_color('13', C.CYAN)}) 关于",
-        "",
+        "",        "",
         f"  {_color('─ 高级（高风险）───────────────────────────────', d)}",
         f"   {_color('14', C.CYAN)}) BL 解锁           解锁 Bootloader（会清空数据）",
         f"   {_color('15', C.CYAN)}) BL 回锁           回锁 Bootloader（需两槽原厂）",
+        f"   {_color('16', C.CYAN)}) 诊断/救砖         判断设备该走哪条刷写路径（只读）",
         "",
         f"   {_color('0', C.CYAN)}) 退出",
     ]
@@ -657,6 +658,7 @@ def run_menu() -> int:
         "13": _menu_about,
         "14": _menu_unlock,
         "15": _menu_relock,
+        "16": _menu_fbd_diagnose,
     }
 
     def _draw() -> None:
@@ -1261,6 +1263,83 @@ def _menu_relock(sess: "Session", mon) -> None:
     if rc != 0:
         print()
         print(f"  {_color('回锁未完成。', C.YELLOW)}")
+    pause()
+
+
+def _menu_fbd_diagnose(sess: "Session", mon) -> None:
+    """菜单 16：诊断/救砖 —— 判断设备该走哪条刷写路径（只读，不写设备）。
+
+    这是「仅 FastbootD」「修复 FastbootD」救砖路径的分流探针：
+    读 getvar is-userspace 判断在 bootloader 还是 FastbootD，给出建议。
+    **纯只读**：不 reboot、不 flash、不 erase（避免误伤仅剩 FBD 的设备）。
+    """
+    from ..core.flash import BlSymptom, FbdRecommendation, diagnose_fbd
+    from ..device.discover import DeviceMode, detect
+    from ..device.runner import AdbRunner as _Adb, FastbootRunner as _Fb
+
+    print()
+    print(f"  {_color('诊断 / 救砖分流', C.BOLD)}")
+    print(_color("  只读检查，不写设备、不重启。", C.DIM))
+    print()
+
+    # 重新探测一次真实设备状态（监测快照可能滞后/为空，见 DEVNOTES 1.4）。
+    try:
+        dev = detect()
+    except Exception:  # noqa: BLE001
+        dev = None
+    mode = getattr(dev, "mode", None)
+
+    if mode is None:
+        print(_color("  未检测到设备。请检查数据线 / USB 调试 / adb、fastboot。", C.YELLOW))
+        pause()
+        return
+
+    # 「BL 是否可用 / 症状」是 FBD_ONLY / RESCUE_ABL 判定的关键输入。
+    # 只读无法可靠判断，必须问用户（绝不能发 reboot bootloader 去试探，会失联）。
+    bl_dead = False
+    bl_symptom = BlSymptom.NONE
+    if mode == DeviceMode.FASTBOOTD:
+        print("  设备当前在 FastbootD。请描述这台机的 Bootloader 情况：")
+        print(f"    {_color('1', C.CYAN)}) Bootloader 正常（能进）")
+        print(f"    {_color('2', C.CYAN)}) Bootloader 能进但「秒退」（ColorOS 16/17 封 fastboot 典型）")
+        print(f"    {_color('3', C.CYAN)}) 完全进不了 Bootloader（丢 OCDT / 格机 / 换主板）")
+        pick = ask("请选择", "1").strip()
+        if pick == "2":
+            bl_symptom = BlSymptom.INSTANT_EXIT
+        elif pick == "3":
+            bl_dead = True
+
+    adb = _Adb() if mode == DeviceMode.ADB else None
+    fb = None if mode == DeviceMode.ADB else _Fb()
+
+    diag = diagnose_fbd(
+        adb=adb, fb=fb, bl_declared_dead=bl_dead, bl_symptom=bl_symptom
+    )
+
+    print()
+    print(f"  {_color('诊断结果：', C.BOLD)}")
+    for line in diag.to_lines():
+        print(f"    {line}")
+    print()
+
+    # 给出下一步指引（不自动执行，交用户决定）
+    if diag.recommendation is FbdRecommendation.FBD_ONLY:
+        print(_color("  建议：走【仅 FastbootD】救砖（当前版本暂未接入菜单执行入口）。", C.YELLOW))
+        print("    手动流程：在 FastbootD 内对每个逻辑分区 delete/create 后 flash，绝不碰 bootloader 侧分区。")
+    elif diag.recommendation is FbdRecommendation.RESCUE_ABL:
+        print(_color("  建议：用 FastbootD 刷【旧版 abl】救回 bootloader（高风险，版本必须对得上）。", C.YELLOW))
+        print("    手动流程：fastboot flash abl_a <旧版abl.img>（只刷当前槽），再 fastboot reboot bootloader 验证。")
+        print(_color("    各机型 abl 不通用；ARB 熔断 / 新 abl 锁死的机型不可用。", C.DIM))
+    elif diag.recommendation is FbdRecommendation.REPAIR_FBD:
+        print(_color("  建议：走【修复 FastbootD】（当前版本暂未接入菜单执行入口）。", C.YELLOW))
+        print("    核心：刷回 recovery.img（fastbootd 寄生在 recovery 里），再 reboot fastboot 验证。")
+    elif diag.recommendation is FbdRecommendation.NORMAL:
+        if diag.state.value == "adb":
+            print(_color("  设备正常（已开机）。要刷机请先重启到 fastboot/fastbootd。", C.GREEN))
+        else:
+            print(_color("  FBD 环境正常，用菜单 2/3 的普通或强力线刷即可。", C.GREEN))
+    elif diag.recommendation is FbdRecommendation.UNKNOWN:
+        print(_color("  未能判断，请确认设备已连接（adb / fastboot 均可用）。", C.YELLOW))
     pause()
 
 

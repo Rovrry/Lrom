@@ -2,6 +2,53 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.7.9-rc1] - 2026-10-28
+
+### 新增：FastbootD 救砖分流（只读诊断 + 仅 FastbootD 执行路径）
+
+为「仅 FastbootD / 修复 FastbootD」两条紫罗兰救砖路径打地基
+（深研见 docs/research/violet-fbd-only-deep.md、
+violet-repair-fbd-deep.md）。两台机的故障方向相反，分流的根节点是
+`fastboot getvar is-userspace`。
+
+**① 只读诊断 `diagnose_fbd()` + 菜单 16「诊断/救砖」**
+
+- 纯只读判断设备处于 adb / bootloader / FastbootD，给出「该走哪条路」的建议：
+  - 已开机 → 普通；在 bootloader → 进不了 FBD 时建议「修复 FastbootD」；
+  - 在 FastbootD 且用户声明 bootloader **秒退**（ColorOS 16/17 封 fastboot）→
+    建议 `RESCUE_ABL`：用 FBD 刷**旧版、当前槽 abl** 救回 bootloader；
+  - 在 FastbootD 且用户声明**完全进不了 bootloader**（丢 OCDT/格机/换主板）→
+    建议「仅 FastbootD」。
+- **安全铁律**：诊断绝不 reboot / flash / erase，也绝不发 `reboot bootloader`
+  去「试探」BL —— 对「仅 FBD」设备那会断掉唯一救命通道（深研红线）。
+
+**事实修正（据联网核查，docs/research/fastbootd-rescue-factcheck.md）**
+
+- AOSP 官方：fastbootd 的 HAL 打包在 **recovery** 镜像里（fastbootd 寄生
+  recovery）→ **「修复 FastbootD」核心第一动作应是刷回 recovery.img**，
+  而非先前深研推断的「只刷 boot/vbmeta」。诊断里 REPAIR_FBD 的指引已按此更正。
+- **ColorOS 16/17 封 fastboot**：内测 + 正式版都有；症状是 bootloader 秒退但
+  FBD 仍可用 → 用 FBD 刷旧版 abl（只刷当前槽）可救回。已作为独立分支
+  `RESCUE_ABL`（带版本风险 / ARB 熔断风险告警）。
+- **新增 `BlSymptom` 输入**（none / cannot_enter / instant_exit），区分
+  「永久进不去 BL」（FBD_ONLY）与「秒退可救」（RESCUE_ABL）。
+
+**② 修 `run()` 不再踢死「仅 FastbootD」的设备（关键缺口）**
+
+- 原来 `run()` 第一步无条件 `_ensure_fastboot()`，遇到 FBD 设备会
+  `fastboot reboot bootloader`，把「BL 坏了、只剩 FBD」的救砖设备唯一命脉
+  踢掉、随后失败。现有 `fbd_only` 分支：跳过 `_ensure_fastboot` 与
+  FASTBOOT 阶段，只在 FBD 刷逻辑分区；**计划里若含任何 bootloader 侧分区则
+  直接拒绝**，防二次变砖；设备不在 FBD 时只提示、绝不代为 reboot 切模式。
+
+**说明**：`repair_fbd` 执行路径（刷 recovery / 引导链）与菜单执行入口、版本
+一致性校验留待下一批（需真机验证，风险更高）。本批只做低风险的分流诊断 +
+FBD 安全执行基础。
+
+测试 403 -> 416（新增 test_fbd_diagnose.py：三态诊断 / 只读无副作用 /
+fbd_only 跳过 BL 阶段 / 拒绝 BL 侧分区 / 不在 FBD 不自作主张 reboot /
+RESCUE_ABL 秒退分支 + 只读）。
+
 ## [0.7.8-rc1] - 2026-10-28
 
 ### 改进：线刷模式拆成三档（普通 / 强力 / 回锁）
