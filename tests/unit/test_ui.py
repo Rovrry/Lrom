@@ -44,3 +44,10 @@ def test_no_pictograph_emoji_in_source():
                 offenders.append((p.name, hex(ord(ch))))
                 break
     assert not offenders, f"仍有 emoji/象形符号: {offenders}"
+
+
+def test_display_width_and_pad():
+    assert ui.display_width("adb") == 3
+    assert ui.display_width("设备") == 4  # 全角按 2 列
+    assert ui.pad("adb", 5) == "adb  "
+    assert ui.pad("设备", 6) == "设备  "

@@ -33,6 +33,9 @@ class CheckItem:
     title: str
     detail: str = ""
     fix: str = ""
+    #: 机器可读标识（如 adb / fastboot / udev / groups / adb_server / usb），
+    #: 供「刷机前置条件」面板分组展示。为空表示不参与摘要。
+    key: str = ""
 
 
 #: 已经安装 udev 规则时，设备节点通常会属于这些组之一
@@ -329,7 +332,63 @@ def run_selfcheck() -> list[CheckItem]:
             )
         )
 
+    # ---- 标注机器可读 key（供「刷机前置条件」面板分组）----
+    # 用标题前缀匹配，避免改动上面每一个 CheckItem 的构造。
+    _key_by_prefix = (
+        ("Python", "python"),
+        ("adb server 归属", "adb_server"),
+        ("多个 adb server", "adb_server"),
+        ("adb server", "adb_server"),
+        ("adb 已安装", "adb"),
+        ("adb 未安装", "adb"),
+        ("adb 版本偏旧", "adb"),
+        ("fastboot 已安装", "fastboot"),
+        ("fastboot 未安装", "fastboot"),
+        ("fastboot 版本偏旧", "fastboot"),
+        ("未找到 Android udev", "udev"),
+        ("udev", "udev"),
+        ("用户组权限", "groups"),
+        ("当前用户不在", "groups"),
+        ("USB 上", "usb"),
+        ("配置文件", "config"),
+    )
+    for it in items:
+        for prefix, key in _key_by_prefix:
+            if it.title.startswith(prefix):
+                it.key = key
+                break
+
     return items
+
+
+#: 「刷机前置条件」面板展示顺序与友好名称。
+PRECONDITION_ORDER = ("python", "adb", "fastboot", "udev", "groups", "adb_server", "usb")
+PRECONDITION_LABELS = {
+    "python": "Python",
+    "adb": "adb",
+    "fastboot": "fastboot",
+    "udev": "设备驱动(udev)",
+    "groups": "设备权限组",
+    "adb_server": "adb server",
+    "usb": "USB 设备",
+}
+
+
+def precondition_summary(items: list[CheckItem]) -> list[tuple[str, Level, str]]:
+    """把自检结果压成「刷机前置条件」摘要：[(显示名, 等级, 一句话值)]。
+
+    只保留连接/刷机必需的项（adb、fastboot、udev 驱动、权限组、adb server、USB），
+    其它（如配置文件）不在此面板展示。
+    """
+    by_key = {it.key: it for it in items if it.key}
+    out: list[tuple[str, Level, str]] = []
+    for key in PRECONDITION_ORDER:
+        it = by_key.get(key)
+        if it is None:
+            continue
+        value = it.detail.splitlines()[0].strip() if it.detail else ""
+        out.append((PRECONDITION_LABELS.get(key, key), it.level, value))
+    return out
 
 
 def format_selfcheck(items: list[CheckItem]) -> str:

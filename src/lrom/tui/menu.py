@@ -15,7 +15,7 @@ from enum import Enum
 from pathlib import Path
 
 from .. import __version__
-from ..ui import status
+from ..ui import pad, status
 
 
 class FlashMode(Enum):
@@ -689,6 +689,10 @@ def startup_env_check() -> bool:
 
     print(_color("   环境检测通过", C.GREEN + C.BOLD))
     print()
+    # 让用户有机会读完上面的检查结果（旧版这里直接清屏，导致「一闪而过」）。
+    # 仅在真实终端暂停；管道/脚本场景跳过，避免吞掉输入。
+    if sys.stdin.isatty() and not os.environ.get("LROM_SKIP_ENV_PAUSE"):
+        pause("按回车进入主菜单（如上方有『注意/错误』项，请先按修复方法处理）")
     return True
 
 
@@ -1007,6 +1011,64 @@ def _choose_flash_mode(dry_run: bool) -> "FlashMode | None":
         print(f"  {_color('输入无效，请重新选择', C.YELLOW)}")
 
 
+def _show_flash_preconditions() -> bool:
+    """刷机前展示前置条件（adb / fastboot / 驱动(udev) / 权限组 / adb server / USB）。
+
+    返回 False 表示关键工具（adb 或 fastboot）缺失，应中止刷机。
+
+    背景：环境自检只在启动时打印一次，很快被清屏（「一闪而过」）。真正刷机前
+    再明确展示一次，并把缺失项用红色底色高亮 + 给出安装命令。
+    """
+    from ..device.selfcheck import Level, precondition_summary, run_selfcheck
+
+    _clear_screen()
+    print()
+    print(_color("  ── 刷机前置条件 ──", C.BOLD))
+    print()
+
+    items = run_selfcheck()
+    summary = precondition_summary(items)
+
+    critical_missing: list[str] = []
+    for label, level, value in summary:
+        if level is Level.ERROR:
+            mark, color = "错误", C.RED
+            if label in ("adb", "fastboot"):
+                critical_missing.append(label)
+        elif level is Level.WARN:
+            mark, color = "注意", C.YELLOW
+        elif level is Level.OK:
+            mark, color = "通过", C.GREEN
+        else:
+            mark, color = "信息", C.BLUE
+        line = f"    {pad(label, 14)} {_color(mark, color)}"
+        if value:
+            line += f"  {_color(value, C.DIM)}"
+        print(line)
+
+    print()
+    if critical_missing:
+        print("  " + status("error", f"缺少关键工具：{', '.join(critical_missing)}，无法刷机"))
+        for it in items:
+            if it.level is Level.ERROR and it.key in ("adb", "fastboot"):
+                for ln in (it.fix or "").splitlines():
+                    print(f"      {ln}")
+        print()
+        return False
+
+    warns = [s for s in summary if s[1] is Level.WARN]
+    if warns:
+        print(
+            "  "
+            + status(
+                "warn",
+                f"有 {len(warns)} 项提示，可能影响连接稳定性，请留意上面的修复建议",
+            )
+        )
+        print()
+    return True
+
+
 def _flow_flash(
     sess: Session, mon, *, dry_run: bool, pick: bool = False,
 ) -> None:
@@ -1017,6 +1079,11 @@ def _flow_flash(
     if not sess.unpacked:
         print()
         print(f"  {_color('尚未解包，请先执行菜单 1（解全量包）', C.YELLOW)}")
+        pause()
+        return
+
+    # ── 刷机前置条件（adb / fastboot / 驱动 / 权限 / 连接）──
+    if not _show_flash_preconditions():
         pause()
         return
 

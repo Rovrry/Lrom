@@ -90,3 +90,19 @@ def format_bytes(n: float) -> str:
     if n >= 1 << 10:
         return f"{n / (1 << 10):.1f} KB"
     return f"{int(n)} B"
+
+
+def display_width(text: str) -> int:
+    """终端显示宽度（中日韩全角字符按 2 列计，其余按 1 列）。"""
+    import unicodedata
+
+    width = 0
+    for ch in text:
+        width += 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+    return width
+
+
+def pad(text: str, width: int, fill: str = " ") -> str:
+    """按**显示宽度**右侧补空格对齐（中文标签对齐用）。"""
+    need = width - display_width(text)
+    return text + fill * need if need > 0 else text
