@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -247,8 +248,14 @@ def dump_partitions(
     *,
     exclude: frozenset[str] = DEFAULT_EXCLUDE,
     on_result=None,
+    on_progress=None,
 ) -> tuple[list[str], list[str], dict[str, str]]:
-    """逐分区 dd 回读。返回 (成功, 跳过, 失败)。"""
+    """逐分区 dd 回读。返回 (成功, 跳过, 失败)。
+
+    ``on_progress(name, done_bytes, total_bytes, elapsed_s)`` 在写入过程中约每秒
+    回调一次，供上层实时显示已用时长/进度（大分区如 super 14GB 时尤其重要，
+    否则长时间无输出会被误认为卡死）。
+    """
     dumped: list[str] = []
     skipped: list[str] = []
     failed: dict[str, str] = {}
@@ -265,37 +272,62 @@ def dump_partitions(
             f"{root_prefix} 'dd if=/dev/block/by-name/{e.name} bs=4M 2>/dev/null'",
         ]
         tmp = dest.with_suffix(".img.part")
+        start = time.monotonic()
+        timed_out = False
+        err = b""
         try:
             with open(tmp, "wb") as fh:
                 proc = subprocess.Popen(argv, stdout=fh, stderr=subprocess.PIPE)
-                _, err = proc.communicate(timeout=3600)
-            if proc.returncode != 0:
-                tmp.unlink(missing_ok=True)
-                failed[e.name] = (err or b"").decode("utf-8", "replace")[:200]
-                if on_result:
-                    on_result(e.name, False, failed[e.name])
-                continue
-            size = tmp.stat().st_size
-            if e.size_bytes and size != e.size_bytes:
-                tmp.unlink(missing_ok=True)
-                failed[e.name] = f"尺寸不符：期望 {e.size_bytes}，实得 {size}"
-                if on_result:
-                    on_result(e.name, False, failed[e.name])
-                continue
-            tmp.replace(dest)
-            dumped.append(e.name)
-            if on_result:
-                on_result(e.name, True, f"{size / 1e6:.1f} MB")
-        except subprocess.TimeoutExpired:
-            tmp.unlink(missing_ok=True)
-            failed[e.name] = "超时"
-            if on_result:
-                on_result(e.name, False, "超时")
+                while True:
+                    try:
+                        proc.wait(timeout=1.0)
+                        break
+                    except subprocess.TimeoutExpired:
+                        if on_progress is not None:
+                            try:
+                                done = tmp.stat().st_size
+                            except OSError:
+                                done = 0
+                            on_progress(
+                                e.name, done, e.size_bytes, time.monotonic() - start
+                            )
+                        if time.monotonic() - start > 3600:
+                            proc.kill()
+                            proc.wait()
+                            timed_out = True
+                            break
+                err = proc.stderr.read() if proc.stderr else b""
         except OSError as exc:
             tmp.unlink(missing_ok=True)
             failed[e.name] = str(exc)
             if on_result:
-                on_result(e.name, False, str(exc))
+                on_result(e.name, False, str(exc), time.monotonic() - start)
+            continue
+
+        elapsed = time.monotonic() - start
+        if timed_out:
+            tmp.unlink(missing_ok=True)
+            failed[e.name] = "超时"
+            if on_result:
+                on_result(e.name, False, "超时", elapsed)
+            continue
+        if proc.returncode != 0:
+            tmp.unlink(missing_ok=True)
+            failed[e.name] = (err or b"").decode("utf-8", "replace")[:200]
+            if on_result:
+                on_result(e.name, False, failed[e.name], elapsed)
+            continue
+        size = tmp.stat().st_size
+        if e.size_bytes and size != e.size_bytes:
+            tmp.unlink(missing_ok=True)
+            failed[e.name] = f"尺寸不符：期望 {e.size_bytes}，实得 {size}"
+            if on_result:
+                on_result(e.name, False, failed[e.name], elapsed)
+            continue
+        tmp.replace(dest)
+        dumped.append(e.name)
+        if on_result:
+            on_result(e.name, True, f"{size / 1e6:.1f} MB", elapsed)
     return dumped, skipped, failed
 
 
@@ -307,8 +339,13 @@ def full_dump(
     exclude: frozenset[str] = DEFAULT_EXCLUDE,
     on_result=None,
     on_notice=None,
+    on_progress=None,
+    meta: dict | None = None,
 ) -> FullDumpResult:
-    """字库备份主流程。"""
+    """字库备份主流程。
+
+    ``meta`` 会原样并入 ``disk_info.json``（用于记录机型/日期等来源信息）。
+    """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     res = FullDumpResult(out_dir=out_dir)
@@ -328,7 +365,8 @@ def full_dump(
     if on_notice:
         on_notice("回读分区…")
     dumped, skipped, failed = dump_partitions(
-        adb, root_prefix, entries, out_dir, exclude=exclude, on_result=on_result
+        adb, root_prefix, entries, out_dir,
+        exclude=exclude, on_result=on_result, on_progress=on_progress,
     )
     res.dumped, res.skipped, res.failed = dumped, skipped, failed
 
@@ -340,6 +378,7 @@ def full_dump(
     info = {
         "tool": "lrom",
         "kind": "fulldump",
+        **(meta or {}),
         "partitions": [
             {
                 "name": e.name, "disk": e.disk, "node": e.node,

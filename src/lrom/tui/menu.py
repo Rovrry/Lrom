@@ -15,6 +15,7 @@ from enum import Enum
 from pathlib import Path
 
 from .. import __version__
+from ..ui import status
 
 
 class FlashMode(Enum):
@@ -72,10 +73,24 @@ class C:
     BLUE = "\033[34m"
     MAGENTA = "\033[35m"
     CYAN = "\033[36m"
+    BLACK = "\033[30m"
+    WHITE = "\033[97m"
+    BG_RED = "\033[41m"
+    BG_GREEN = "\033[42m"
+    BG_YELLOW = "\033[43m"
+    BG_BLUE = "\033[44m"
+    BG_MAGENTA = "\033[45m"
+    BG_CYAN = "\033[46m"
+    BG_WHITE = "\033[47m"
+
+
+def _style_to_bg(style: str) -> str:
+    """只把红色前景改成红色文字底色（重要提示 / 报错）；其余颜色保持前景色。"""
+    return style.replace(C.RED, C.BG_RED + C.WHITE)
 
 
 def _color(s: str, c: str) -> str:
-    return f"{c}{s}{C.RESET}" if sys.stdout.isatty() else s
+    return f"{_style_to_bg(c)}{s}{C.RESET}" if sys.stdout.isatty() else s
 
 
 # ---------------------------------------------------------------------------
@@ -102,7 +117,7 @@ def confirm(prompt: str, word: str | None = None) -> bool:
     """确认。word 非空时必须完整输入该词。"""
     if word:
         print()
-        print(_color(f"  ⚠  {prompt}", C.RED + C.BOLD))
+        print(_color(f"    {prompt}", C.RED + C.BOLD))
         print(f"  输入 {_color(word, C.BOLD)} 确认，其他任意输入取消: ", end="")
         try:
             return input().strip() == word
@@ -251,6 +266,9 @@ class Session:
         # 包版本号缓存（避免每次进菜单都解析 ZIP）
         self._cached_version: str | None = None
         self._cached_version_for: str | None = None
+        # 包信息缓存（主页头部的型号/版本/分区数要用，避免每次重绘都解析 ZIP）
+        self._cached_info = None
+        self._cached_info_for: str | None = None
 
         cfg = load_config()
         if wd := cfg.get("work_dir"):
@@ -292,19 +310,28 @@ class Session:
 
     def _package_version(self) -> str | None:
         """读取包内版本号（带缓存，避免每次进菜单都解析 ZIP）。"""
-        if self._cached_version_for == (str(self.package) if self.package else None):
-            return self._cached_version
-        self._cached_version_for = str(self.package) if self.package else None
-        self._cached_version = None
+        info = self.package_info()
+        return info.version_name if info else None
+
+    def package_info(self):
+        """解析并缓存当前 ROM 包信息（主页头部展示型号/版本/分区数用）。
+
+        按包路径缓存：路径不变就复用，避免实时重绘时反复解析 ZIP。
+        解析失败返回 None（头部会退化为只显示文件名/路径）。
+        """
+        key = str(self.package) if self.package else None
+        if key == self._cached_info_for:
+            return self._cached_info
+        self._cached_info_for = key
+        self._cached_info = None
         if self.package and Path(self.package).exists():
             try:
                 from ..core.package import inspect_package
 
-                info = inspect_package(Path(self.package))
-                self._cached_version = info.version_name or None
+                self._cached_info = inspect_package(Path(self.package))
             except Exception:  # noqa: BLE001
-                self._cached_version = None
-        return self._cached_version
+                self._cached_info = None
+        return self._cached_info
 
 
     @property
@@ -334,12 +361,12 @@ def build_menu(sess: "Session", env_ok: bool) -> str:
     lines = [
         f"  {_color('─ 刷写流程 ────────────────────────────────────', d)}",
         f"   {_color('1', C.CYAN)}) 解全量包          选择 ROM 包并解出镜像",
-        f"   {_color('2', C.CYAN)}) 预演检查          ★ 不写设备，选模式后预演",
+        f"   {_color('2', C.CYAN)}) 预演检查         不写设备，选模式后预演",
         f"   {_color('3', C.CYAN)}) 线刷全量包        选模式：普通/强力/回锁/仅FBD",
         f"   {_color('4', C.CYAN)}) 只刷指定分区      手动选择分区",
         "",
         f"  {_color('─ 安全 ────────────────────────────────────────', d)}",
-        f"   {_color('5', C.CYAN)}) 备份设备分区      刷前备份（需 root）",
+        f"   {_color('5', C.CYAN)}) 全量备份          全部分区 + GPT + XML（需 root）",
         f"   {_color('6', C.CYAN)}) ARB 熔断检测      防降级硬砖",
         "",
         f"  {_color('─ Root ────────────────────────────────────────', d)}",
@@ -471,7 +498,7 @@ def _warn_edl_risk(info, mon) -> bool:
 
     print()
     if res.risk is EdlRisk.WILL_FUSE:
-        print(_color("  ┌─ ⛔ 已拦截：9008 免授权将被永久熔断 " + "─" * 20, C.RED + C.BOLD))
+        print(_color("  ┌─  已拦截：9008 免授权将被永久熔断 " + "─" * 20, C.RED + C.BOLD))
         print(f"  │ 机型    : {model_show}（{matched}）")
         print(f"  │ 包版本  : {res.package_version}")
         print(f"  │ 设备版本: {res.device_version}")
@@ -528,7 +555,7 @@ def print_header(sess: Session, mon=None) -> None:
         label, color = MODE_LABEL.get(snap.mode, (snap.mode, C.GREEN))
         info = snap.model or snap.codename or "未知型号"
         line = (
-            f"  {_color('●', color)} 设备    : "
+            f"  设备    : "
             f"{_color(info, C.BOLD)}  {_color('[' + label + ']', color)}"
         )
         if snap.slot:
@@ -538,18 +565,46 @@ def print_header(sess: Session, mon=None) -> None:
             print(f"              {_color(snap.build_id, C.DIM)}")
         _print_device_facts(snap)
     else:
-        print(f"  {_color('○', C.RED)} 设备    : {_color('未连接', C.RED)}")
+        print(f"  设备    : {_color('未连接', C.RED)}")
         print(f"              {_color('请检查数据线与 USB 调试', C.DIM)}")
 
     print()
     if sess.package:
-        mark = _color("✓", C.GREEN) if sess.unpacked else _color("·", C.DIM)
-        print(f"    ROM 包  : {_color(sess.package.name, C.CYAN)}")
+        info = sess.package_info()
+        size_txt = ""
+        try:
+            size_txt = (
+                f"  {_color('·', C.DIM)}  "
+                f"{sess.package.stat().st_size / (1024 ** 3):.2f} GB"
+            )
+        except OSError:
+            size_txt = ""
+        print(f"    ROM 包  : {_color(sess.package.name, C.CYAN)}{size_txt}")
+        # 完整路径：让用户一眼看清这是**本地位置**，不是项目默认路径
+        print(f"    路径    : {_color(str(sess.package), C.DIM)}")
+
+        facts: list[str] = []
+        if info and info.product_name:
+            model = info.product_name
+            if info.pre_device:
+                model += f"（{info.pre_device}）"
+            facts.append(f"机型 {_color(model, C.BOLD)}")
+        if info and info.android_version:
+            facts.append(f"Android {info.android_version}")
+        if info and info.version_name:
+            facts.append(f"版本 {info.version_name}")
+        if facts:
+            print("    " + "  ·  ".join(facts))
+
+        status: list[str] = []
+        if info and info.manifest:
+            status.append(f"分区 {len(info.manifest.partitions)}")
         if sess.unpacked:
             n = len(list(sess.image_dir.glob("*.img")))
-            print(f"    {mark} 已解包  : {n} 个镜像")
+            status.append(_color(f"已解包 {n} 个镜像", C.GREEN))
         else:
-            print(f"    {mark} 已解包  : {_color('尚未解包', C.DIM)}")
+            status.append(_color("尚未解包", C.DIM))
+        print("    " + "  ·  ".join(status))
     else:
         print(f"    ROM 包  : {_color('未选择', C.DIM)}")
     print()
@@ -588,10 +643,10 @@ def startup_env_check() -> bool:
 
     items = run_selfcheck()
     marks = {
-        Level.OK: ("✓", C.GREEN),
-        Level.WARN: ("!", C.YELLOW),
-        Level.ERROR: ("✗", C.RED),
-        Level.INFO: ("·", C.BLUE),
+        Level.OK: ("通过", C.GREEN),
+        Level.WARN: ("注意", C.YELLOW),
+        Level.ERROR: ("错误", C.RED),
+        Level.INFO: ("信息", C.BLUE),
     }
     errors, warns = [], []
     for it in items:
@@ -607,7 +662,7 @@ def startup_env_check() -> bool:
         print(_color(f"  发现 {len(errors)} 个必须解决的问题：", C.RED + C.BOLD))
         print()
         for it in errors:
-            print(_color(f"  ✗ {it.title}", C.RED + C.BOLD))
+            print(_color(f"   {it.title}", C.RED + C.BOLD))
             if it.detail:
                 for ln in it.detail.splitlines():
                     print(f"      {ln}")
@@ -632,7 +687,7 @@ def startup_env_check() -> bool:
             print(f"    ! {it.title}")
         print()
 
-    print(_color("  ✓ 环境检测通过", C.GREEN + C.BOLD))
+    print(_color("   环境检测通过", C.GREEN + C.BOLD))
     print()
     return True
 
@@ -818,7 +873,7 @@ def _flow_unpack(sess: Session, mon) -> None:
             print()
             print(
                 _color(
-                    f"  ⚠ 这不是当前设备的 ROM 包",
+                    f"   这不是当前设备的 ROM 包",
                     C.RED + C.BOLD,
                 )
             )
@@ -836,7 +891,7 @@ def _flow_unpack(sess: Session, mon) -> None:
             if not confirm("仍然解包吗？"):
                 return
         else:
-            print(f"    {_color('✓', C.GREEN)} 型号匹配: {snap.codename}")
+            print("    " + status("ok", f"型号匹配: {snap.codename}"))
 
     # ---- 解包 ----
     out = sess.image_dir
@@ -869,7 +924,7 @@ def _flow_unpack(sess: Session, mon) -> None:
 
     def on_result(res):
         counter["n"] += 1
-        mark = _color("✓", C.GREEN) if res.ok else _color("✗", C.RED)
+        mark = status("ok", "完成") if res.ok else status("error", "失败")
         detail = f"{res.size_mb:>9,.1f} MB" if res.ok else res.error
         print(f"  [{counter['n']:2}] {res.partition:<18} {mark} {detail:<36}")
 
@@ -893,7 +948,7 @@ def _flow_unpack(sess: Session, mon) -> None:
 
     print()
     if all_ok:
-        print(_color(f"  ✓ 解包完成：{ok} 个分区", C.GREEN + C.BOLD))
+        print(_color(f"   解包完成：{ok} 个分区", C.GREEN + C.BOLD))
     else:
         print(_color(f"  完成 {ok}/{len(results)}", C.RED))
     pause()
@@ -1078,7 +1133,7 @@ def _flow_flash(
     print()
     print(f"  {_color('刷写选项：', C.BOLD)}")
     print(_color("  在下一步输入 q 可退出，不会写入任何数据", C.DIM))
-    ans = ask("清空用户数据？（降级或救砖必须选 y，直接回车保留数据，输入 q 退出）")
+    ans = ask("清空用户数据（格式化数据分区）？（降级或救砖必须选 y，回车保留数据，输入 q 退出）")
     if ans.strip().lower() in ("q", "quit", "exit"):
         print(f"  {_color('已取消，未写入任何数据', C.DIM)}")
         pause()
@@ -1096,11 +1151,18 @@ def _flow_flash(
         import argparse as _argparse
 
         from ..cli import cmd_backup as _cmd_backup
+        from ..core.backup import DEFAULT_BACKUP_PARTITIONS as _KEY_PARTS
 
         print()
         print(_color("  开始备份关键分区…（若设备不在 ADB 模式或未 root 会失败，可跳过继续）", C.DIM))
         try:
-            _cmd_backup(_argparse.Namespace(partitions=None, output="backups", adb_port=None))
+            # 刷写前这一步是「快速关键分区备份」，显式传入精选清单，
+            # 不触发默认全备份（全备份请用菜单 5，避免刷机前无谓地占十几 GB）。
+            _cmd_backup(
+                _argparse.Namespace(
+                    partitions=list(_KEY_PARTS), output="backups", adb_port=None
+                )
+            )
         except Exception as exc:  # noqa: BLE001
             print(_color(f"  ! 备份未完成：{exc}（可继续刷写）", C.YELLOW))
         print()
@@ -1129,52 +1191,48 @@ def _flow_flash(
 
 
 def _menu_backup(sess: Session, mon) -> None:
-    """菜单 5：备份设备分区。
+    """菜单 5：备份设备分区（**默认全量备份**，对齐紫罗兰「备份字库」）。
 
-    两种模式：
-      1) 关键分区备份（精简）：只备不可再生的身份/基带/回锁/BL 链分区
-      2) 字库备份（全量）：全分区回读 + 主/备 GPT + RawProgram XML（对齐紫罗兰）
-    两者都需要 ADB 开机模式 + shell root。
+    默认行为 = 全备份：
+      · 回读设备**实际存在的全部分区**（不再只备精选清单）
+      · 生成主/备 GPT + RawProgram XML（紫罗兰「备份字库」同款产物）
+      · 默认排除 userdata/cache（用户数据、体积大且无回滚价值）
+    需要 ADB 开机模式 + shell root。
     """
     import argparse
 
+    from ..cli import cmd_fulldump
+    from ..ui import status
+
     print()
-    print(f"  {_color('备份设备分区', C.BOLD)}")
+    print(f"  {_color('备份设备分区（全量）', C.BOLD)}")
     print()
-    print(f"    {_color('1', C.CYAN)}) 关键分区备份（精简，推荐先做）")
-    print(_color("       只备不可再生的：persist / modemst / fsg / ocdt / oplusreserve 等", C.DIM))
-    print(f"    {_color('2', C.CYAN)}) 字库备份（全量）")
-    print(_color("       全分区回读 + 主/备 GPT + RawProgram XML；占空间大（默认排除 userdata/super）", C.DIM))
-    print(f"    {_color('0', C.CYAN)}) 返回")
+    print(f"  将备份 : {_color('设备全部分区', C.BOLD)} + 主/备 GPT + RawProgram XML")
+    print("           默认排除 userdata / cache（用户数据）")
+    print(
+        "  输出到 : "
+        + _color("backups/机型_日期/", C.CYAN)
+        + "（如 backups/OPD2404_20261029-013451/）"
+    )
     print()
-    pick = ask("请选择", "1").strip().lower()
-    if pick in ("0", "q", "quit", "exit"):
+    print("  " + status("warn", "全量备份耗时较久，约 10–20 分钟（取决于分区大小），请耐心等待，勿拔线"))
+    print()
+
+    if not confirm("开始全量备份？"):
         print(f"  {_color('已取消', C.DIM)}")
         pause()
         return
 
-    if pick == "2":
-        from ..cli import cmd_fulldump
-
-        print()
-        print(_color("  字库备份会回读所有分区（排除 userdata/cache/super），需要较大磁盘空间。", C.YELLOW))
-        inc = ask("是否包含 super（9GB+，系统分区可由官方包重刷）？（y/N）", "n").strip().lower()
-        rc = cmd_fulldump(
-            argparse.Namespace(
-                output="backups",
-                include_super=inc in ("y", "yes", "是"),
-                exclude=None,
-                adb_port=None,
-            )
+    rc = cmd_fulldump(
+        argparse.Namespace(
+            output="backups",
+            include_super=True,
+            exclude=None,
+            adb_port=None,
         )
-        if rc != 0:
-            print(f"  {_color('字库备份未完整完成。', C.YELLOW)}")
-        pause()
-        return
-
-    from ..cli import cmd_backup
-
-    cmd_backup(argparse.Namespace(partitions=None, output="backups", adb_port=None))
+    )
+    if rc != 0:
+        print("  " + status("error", "全量备份未完整完成"))
     pause()
 
 
@@ -1252,7 +1310,7 @@ def _menu_reboot(sess: Session, mon) -> None:
         else:
             return
 
-    print(f"  {_color('✓', C.GREEN)} 已发送重启命令")
+    print("  " + status("ok", "已发送重启命令"))
     pause()
 
 
@@ -1335,7 +1393,7 @@ def _menu_relock(sess: "Session", mon) -> None:
     print()
     print(f"  {_color('BL 回锁', C.RED + C.BOLD)}")
     print()
-    print(f"  {_color('⚠ 回锁前提', C.RED + C.BOLD)}：两个槽的关键分区都必须是")
+    print(f"  {_color(' 回锁前提', C.RED + C.BOLD)}：两个槽的关键分区都必须是")
     print("    本机的原厂签名镜像（不是 root / 三方 ROM / 跨区包）。")
     print("    否则回锁后设备会变砖，且没有解锁通道自救。")
     print()
@@ -1501,7 +1559,7 @@ def _print_beta_and_arb_warnings(adb, serial) -> None:
 
         bi = detect_beta_channel(adb, serial)
         if bi.suspicion == "beta_likely":
-            print(_color("  ⚠ 疑似【内测/Beta 版】系统：", C.RED + C.BOLD))
+            print(_color("   疑似【内测/Beta 版】系统：", C.RED + C.BOLD))
             for r in bi.reasons:
                 print(f"    · {r}")
             print(_color("    内测版是 fastboot 被封的高危触发源，且内测→正式/降级可能触发 ARB。请谨慎。", C.YELLOW))
@@ -1522,7 +1580,7 @@ def _print_beta_and_arb_warnings(adb, serial) -> None:
             idx = arb.arb_index
             level = C.RED if idx >= 1 else C.GREEN
             print(f"  设备 ARB 回滚索引：{_color(str(idx), level)}"
-                  + (_color("  ⚠ 已熔断，任何降级/刷旧 abl 都可能硬砖！", C.RED) if idx >= 1 else ""))
+                  + (_color("   已熔断，任何降级/刷旧 abl 都可能硬砖！", C.RED) if idx >= 1 else ""))
         else:
             print(_color("  ARB 回滚索引：读不到。", C.DIM))
             print(_color(f"    {arb_root_hint()}", C.DIM))
@@ -1590,8 +1648,8 @@ def _menu_repair_fbd(sess: "Session", mon) -> None:
         return
 
     print(f"  recovery 镜像：{recovery_img}（{recovery_img.stat().st_size / 2**20:.0f} MB）")
-    print(_color("  ⚠ 建议用【与设备当前系统同版本】的官方全量包里的 recovery.img。", C.YELLOW))
-    print(_color("  ⚠ 刷错代价：通常 bootloop / 卡 fastboot（可刷回），非硬砖；但请尽量用匹配版本。", C.DIM))
+    print(_color("   建议用【与设备当前系统同版本】的官方全量包里的 recovery.img。", C.YELLOW))
+    print(_color("   刷错代价：通常 bootloop / 卡 fastboot（可刷回），非硬砖；但请尽量用匹配版本。", C.DIM))
     print()
     ans = ask("确认开始修复 FastbootD？输入 YES 继续（其他取消）", "")
     if ans.strip() != "YES":
@@ -1622,19 +1680,27 @@ def _menu_repair_fbd(sess: "Session", mon) -> None:
     print()
     if res.ok and res.flashed:
         if res.verified_fbd:
-            print(_color("  ✓ 修复成功：FastbootD 已恢复。", C.GREEN + C.BOLD))
+            print(_color("   修复成功：FastbootD 已恢复。", C.GREEN + C.BOLD))
         else:
-            print(_color("  ✓ recovery 已刷入。", C.GREEN))
+            print(_color("   recovery 已刷入。", C.GREEN))
+        print()
+        print(
+            "   "
+            + status(
+                "important",
+                "救砖提示：后续刷完全量包后，请在首次开机前格式化数据分区（清除用户数据），否则可能无法开机",
+            )
+        )
     elif res.ok and not res.flashed:
         print(_color("  fastbootd 本身正常，无需修复。", C.GREEN))
     else:
-        print(_color("  ✗ 修复未完成。", C.RED + C.BOLD))
+        print(_color("   修复未完成。", C.RED + C.BOLD))
         if res.error:
             print(f"    {res.error}")
     if res.warnings:
         print()
         for w in res.warnings:
-            print(_color(f"  ⚠ {w}", C.YELLOW))
+            print(_color(f"   {w}", C.YELLOW))
     pause()
 
 
@@ -1688,22 +1754,22 @@ def _verify_device_for_root(snap, sess: "Session", *, action: str) -> bool:
     返回 True 表示可以继续。
     """
     if not snap or not getattr(snap, "present", False):
-        print(_color("  ⛔ 未检测到设备", C.RED + C.BOLD))
+        print(_color("   未检测到设备", C.RED + C.BOLD))
         print("  请连接设备并确认能识别（./lrom devices）。")
         return False
 
     if snap.mode != "adb":
-        print(_color(f"  ⛔ 设备当前处于 {snap.mode} 模式", C.RED + C.BOLD))
+        print(_color(f"   设备当前处于 {snap.mode} 模式", C.RED + C.BOLD))
         print(f"  {action}需要读取设备信息，请先开机启动再操作。")
         return False
 
     # BL 锁
     if snap.locked == "1":
-        print(_color("  ⛔ Bootloader 未解锁，无法刷写", C.RED + C.BOLD))
+        print(_color("   Bootloader 未解锁，无法刷写", C.RED + C.BOLD))
         print("  请先完成 OEM 解锁。注意：解锁会清空全部用户数据。")
         return False
     if snap.locked == "":
-        print(_color("  ⚠ 无法确认 Bootloader 是否已解锁，请自行确认", C.YELLOW))
+        print(_color("   无法确认 Bootloader 是否已解锁，请自行确认", C.YELLOW))
 
     # 机型一致性（仅当能读到包信息时）
     info = None
@@ -1724,7 +1790,7 @@ def _verify_device_for_root(snap, sess: "Session", *, action: str) -> bool:
         if info.product_name and snap.model and info.product_name != snap.model:
             mismatch = True
         if mismatch:
-            print(_color("  ⛔ 当前 ROM 包与设备机型不一致，拒绝执行", C.RED + C.BOLD))
+            print(_color("   当前 ROM 包与设备机型不一致，拒绝执行", C.RED + C.BOLD))
             print()
             print(f"    设备      : {snap.model or '?'}（代号 {snap.codename or '?'}）")
             print(f"    当前包适用: {info.product_name or '?'}（代号 {info.pre_device or '?'}）")
@@ -1733,7 +1799,7 @@ def _verify_device_for_root(snap, sess: "Session", *, action: str) -> bool:
             print("    请先解包与你设备匹配的 ROM 包。")
             return False
         if dev_key and pkg_key:
-            print(f"  {_color('✓', C.GREEN)} 机型匹配: {snap.model or snap.codename}")
+            print("  " + status("ok", f"机型匹配: {snap.model or snap.codename}"))
 
     # 系统版本提示（不阻断，仅告知，便于用户核对）
     if snap.build_id:
@@ -1970,11 +2036,11 @@ def _install_apk_to_device(apk: Path, mon) -> None:
     print(f"  正在安装 {_color(apk.name, C.BOLD)} 到设备…")
     status, detail = install_manager_apk(apk)
     if status == "installed":
-        print(f"  {_color('✓ 已安装', C.GREEN)}")
+        print(f"  {_color(' 已安装', C.GREEN)}")
         # 装进设备后删掉本地包，避免残留
         try:
             apk.unlink()
-            print(f"  {_color('✓ 已删除本地安装包', C.DIM)}")
+            print(f"  {_color(' 已删除本地安装包', C.DIM)}")
         except OSError as exc:  # noqa: BLE001
             print(f"  {_color(f'! 删除失败: {exc}', C.YELLOW)}")
             print(f"    {apk.resolve()}")
@@ -1983,7 +2049,7 @@ def _install_apk_to_device(apk: Path, mon) -> None:
         print(f"    {detail}")
         print(f"  {_color('本机位置', C.DIM)}: {apk.resolve()}")
     else:
-        print(f"  {_color('⛔ 安装失败', C.RED)}")
+        print(f"  {_color(' 安装失败', C.RED)}")
         print(f"    {detail}")
         print(f"  {_color('本机位置', C.DIM)}: {apk.resolve()}")
 
@@ -2133,7 +2199,7 @@ def _menu_root_rollback(sess: "Session", mon) -> None:
             str(dev_ver) not in str(pkg_ver)
         ):
             print()
-            print(_color("  ⚠ 版本不一致：镜像与设备当前系统版本不同。", C.RED + C.BOLD))
+            print(_color("   版本不一致：镜像与设备当前系统版本不同。", C.RED + C.BOLD))
             print(_color("    刷入不匹配的 init_boot 可能导致无法开机。建议用与设备相同的全量包。", C.RED))
     print()
 
@@ -2169,7 +2235,7 @@ def _menu_root_rollback(sess: "Session", mon) -> None:
         pause()
         return
 
-    print(f"  {_color('✓', C.GREEN)} 已刷回原厂镜像")
+    print("  " + status("ok", "已刷回原厂镜像"))
     print()
     print("  请手动重启设备：")
     print(f"    {_color('fastboot reboot', C.CYAN)}")

@@ -26,14 +26,14 @@ Lrom 是一个 **Linux 原生的 Android 线刷工具**。它把刷机拆成可�
 
 ## 特性
 
-- ✅ **包分析** — 识别全量/增量 OTA、型号、版本、安全补丁
-- ✅ **刷前备份** — adb+root `dd` 备份 boot/init_boot/vbmeta 等关键分区，附 SHA-256 清单
-- ✅ **刷写计划** — 纯数据、可审阅、可导出 JSON
-- ✅ **预演模式** — 完整校验流水线，不写设备
-- ✅ **ARB 熔断检测** — 防降级硬砖
-- ✅ **两阶段刷写** — Fastboot（物理分区）+ FastbootD（逻辑分区）
-- ✅ **关键分区保护** — `persist`/`modemst`/`fsg` 等默认禁写
-- ✅ **零遥测** — 完全离线，不上报任何数据
+- **包分析** — 识别全量/增量 OTA、型号、版本、安全补丁
+- **备份设备分区** — 默认全备份（全部实际分区，排除 userdata/cache），adb+root `dd` 附 SHA-256 清单
+- **刷写计划** — 纯数据、可审阅、可导出 JSON
+- **预演模式** — 完整校验流水线，不写设备
+- **ARB 熔断检测** — 防降级硬砖
+- **两阶段刷写** — Fastboot（物理分区）+ FastbootD（逻辑分区）
+- **关键分区保护** — `persist`/`modemst`/`fsg` 等默认禁写
+- **零遥测** — 完全离线，不上报任何数据
 
 ## 快速开始（无需安装）
 
@@ -93,7 +93,7 @@ lrom selfcheck
 # 1. 分析 ROM 包，确认能否线刷
 lrom inspect ~/Downloads/rom.zip
 
-# 2. 备份设备关键分区（强烈建议）
+# 2. 备份设备全部分区（默认全备份，强烈建议）
 lrom backup
 
 # 3. 解包出分区镜像
@@ -117,7 +117,8 @@ lrom flash ~/Downloads/rom.zip --images unpacked/rom
 | `lrom devices` | 检测连接设备 |
 | `lrom selfcheck` | 环境自检（adb/udev/权限/adb server） |
 | `lrom inspect <包>` | 分析 ROM 包 |
-| `lrom backup` | 刷前备份关键分区（需 root） |
+| `lrom backup` | 备份设备分区（**默认全备份**：全部实际分区，排除 userdata/cache，需 root） |
+| `lrom fulldump` | 字库备份：全分区 + 主/备 GPT + RawProgram XML（需 root） |
 | `lrom unpack <包>` | 解包出分区镜像 |
 | `lrom plan <包>` | 生成刷写计划 |
 | `lrom arb` | ARB 熔断检测 |
@@ -177,9 +178,9 @@ fastboot flash init_boot root-work/init_boot-stock-<时间>.img
 Lrom 内置了实测的熔断机型表，`lrom plan` 和 `lrom flash` 会在写设备前检查：
 
 ```
-✗ ARB 熔断保护：拒绝刷写
+ARB 熔断保护：拒绝刷写
 
-  ⛔ 这个包是 16.0.3.501 之前的版本，而该机型从那时起已熔断 ARB。
+   这个包是 16.0.3.501 之前的版本，而该机型从那时起已熔断 ARB。
     刷入等于降级到熔断前，会导致永久黑砖，且免授权 9008 已失效，无法自救。
 ```
 
@@ -211,7 +212,7 @@ Lrom 除 `fetch-manager` 外**不发起任何网络请求**。该命令的约束
 | `--allow-dangerous` | 允许写危险分区 |
 | `--force-arb` | 跳过 ARB 拦截（极度危险） |
 
-## ⚠️ `--both-slots` 的适用范围
+## `--both-slots` 的适用范围
 
 `--both-slots` **只对物理分区生效**（boot / xbl / vbmeta / dtbo 等）。
 
@@ -239,17 +240,17 @@ Lrom 已在代码层面禁止该行为，并在预检阶段校验 `super` 空间
 │   合计写入          : 9.66 GB
 │
 │ 【镜像完整性】
-│   ✓ 47 个镜像文件全部存在且非空
+│   47 个镜像文件全部存在且非空
 │
 │ 【风险项】
 │   ! 16 个 bootloader 链分区将被写入
 │       tz, uefi, hyp, xbl, keymaster, ...
 │
 │ 【数据影响】
-│   ✓ 不会动 userdata，用户数据保留
+│   不会动 userdata，用户数据保留
 │
 │ 【结论】
-│   ✓ 可以安全刷写
+│   可以安全刷写
 ╰──────────────────────────────────────────────────────╯
 ```
 
@@ -257,20 +258,29 @@ Lrom 已在代码层面禁止该行为，并在预检阶段校验 `super` 空间
 它能提前发现"镜像没解完整""包和机型不匹配""会误删数据"等问题，
 避免刷到一半才发现。
 
-## ⚠️ 重要：Lrom 不会自动重启设备
+## 重要：Lrom 不会自动重启设备
 
 刷写完成后，Lrom 会停下来让你确认。这是刻意的设计——**重启的决策权必须留给你**。
 
-### 如果是降级，必须先格式化
+### 如果是降级，必须先清除用户数据（格式化 data 分区）
 
-> **降级**（刷入版本低于原系统）时，**必须先格式化系统分区**，否则会无法开机甚至变砖。
+> **降级**（刷入版本低于原系统）时，**必须在首次开机前清除用户数据（格式化 `data` / `userdata` 分区）**，
+> 否则旧系统无法解密新系统升级过的 `/data`（FBE 加密密钥 / Keymaster 版本不兼容），会卡开机或首启异常。
+>
+> 注意（叫法）：这里指 **`userdata` 数据分区**，不是 `system`（`super` 内的 system/vendor 逻辑分区由刷包覆盖，
+> 不要单独格式化）。欧加 Recovery 里也叫「清除数据 / 格式化数据分区 / 恢复出厂设置」。
 
 ```bash
-# 方式一：Fastboot 下执行
-fastboot -w
+# 方式一（推荐，高通 A/B 一般足够）：Fastboot 下执行
+fastboot -w            # = 擦 userdata + cache 并重建文件系统
 
-# 方式二：进入 Recovery，选择「格式化 data / 恢复出厂设置」
+# 方式二（最彻底）：进 Recovery/fastbootd 选「格式化数据分区 / Format Data」
+#   —— 会连带清 /metadata；fastboot -w 后仍卡解密/开机时用它
 ```
+
+> 时机：**刷完全量包后、第一次开机进系统之前**完成清数据。Lrom 刻意不自动重启，
+> 请务必在手动 `fastboot reboot` 前清数据。
+> 非降级（同大版本升级）**无需**清数据；`fastboot erase userdata` 单独用不彻底，不推荐。
 
 用 Lrom 刷降级包时，请加 `--wipe`：
 
@@ -289,21 +299,21 @@ fastboot reboot      # 当前在 fastboot
 
 | 包格式 | 状态 |
 |---|---|
-| 欧加（OPPO/OnePlus/realme）全量 OTA 包 | ✅ 已验证 |
-| 通用 payload.bin 全量包 | ✅ |
-| 增量 OTA 包 | ❌ 明确拒绝 |
-| 小米 tgz / OFP / OPS / OZIP | 📋 计划中 |
+| 欧加（OPPO/OnePlus/realme）全量 OTA 包 | 已验证 |
+| 通用 payload.bin 全量包 | 支持 |
+| 增量 OTA 包 | 明确拒绝 |
+| 小米 tgz / OFP / OPS / OZIP | 计划中 |
 
 **v0.1 不包含**：GUI、EDL(9008) 直连、OFP 解密、增量 OTA、自动 Root、联网下载 ROM。
 
 ## 安全警告
 
-⚠️ **刷机有风险，可能变砖、丢失数据、失去保修。** 请务必：
+**刷机有风险，可能变砖、丢失数据、失去保修。** 请务必：
 
 1. 刷机前**备份所有数据**，并先运行 `lrom backup`
 2. 确认设备型号与 ROM 包**完全匹配**（`lrom inspect` 会校验）
 3. 首次使用先跑 **`--dry-run` 预演**
-4. **降级必须格式化**，否则会变砖
+4. **降级必须在首启前清除用户数据（格式化 data 分区）**，否则会无法开机
 5. 保持设备电量 > 50%，使用**直连 USB 2.0 端口**（不要用 Hub）
 
 开发者不对任何设备损坏负责。详见 [LICENSE](LICENSE)。

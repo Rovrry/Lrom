@@ -18,7 +18,7 @@ GitHub Actions 每日扫描各区域 OTA 包）已确认一批机型中招。
 
 代价是需要跟着上游更新。发现新机型中招时，改这个文件即可。
 
-## ⚠️ 数据可信度分级
+##  数据可信度分级
 
 每条记录都标注 ``confidence``：
 
@@ -28,7 +28,7 @@ GitHub Actions 每日扫描各区域 OTA 包）已确认一批机型中招。
 **只有 CONFIRMED 的记录才做硬阻断。** REPORTED 的只警告不阻断，
 避免因为一条存疑数据把用户挡在正常刷机之外。
 
-## ⚠️ 三道防线的关系
+##  三道防线的关系
 
 本模块是**第三道**，也是最粗的一道（只看机型 + 版本号）。
 
@@ -93,7 +93,7 @@ class ArbRecord:
 
 #: 已确认熔断的机型表。
 #:
-#: ⚠️ 只收录**有交叉验证**的机型。存疑的单独标注 confidence=REPORTED。
+#:  只收录**有交叉验证**的机型。存疑的单独标注 confidence=REPORTED。
 ARB_FUSED_MODELS: tuple[ArbRecord, ...] = (
     # --- 第一波，CONFIRMED（固件站 + 追踪表双重确认）---
     ArbRecord(
@@ -359,7 +359,7 @@ def check_arb_risk(
             return ArbCheckResult(
                 risk=risk,
                 message=(
-                    f"⛔ 这个包是 {rec.trigger_version} 之前的版本，"
+                    f" 这个包是 {rec.trigger_version} 之前的版本，"
                     "而该机型从那时起已熔断 ARB。\n"
                     "    刷入等于降级到熔断前，会导致**永久黑砖**，"
                     "且免授权 9008 已失效，无法自救。"
@@ -376,7 +376,7 @@ def check_arb_risk(
             return ArbCheckResult(
                 risk=ArbRisk.BLOCK,
                 message=(
-                    "⛔ 包版本低于设备当前版本 —— 这是一次降级。\n"
+                    " 包版本低于设备当前版本 —— 这是一次降级。\n"
                     "    该机型的 ARB 已熔断，降级会导致**永久黑砖**。"
                 ),
                 record=rec,

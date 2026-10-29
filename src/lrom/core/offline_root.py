@@ -7,8 +7,8 @@
   4. （由调用方）备份原厂 init_boot、fastboot flash、提示装管理器 APK。
 
 支持引擎（见 docs/research/managers-offline-patch.md §6）：
-  · ksu（KernelSU 官方）—— ksud 官方 CLI，✓
-  · ksu-next（KernelSU-Next）—— 同构 ksud，✓
+  · ksu（KernelSU 官方）—— ksud 官方 CLI，
+  · ksu-next（KernelSU-Next）—— 同构 ksud，
   · sukisu —— 官方 release 只有 *-linux-android（PC 跑不了）→ 不支持脱机，走 APP
   · magisk —— APK 内藏 x86_64 magiskboot（非官方流程），暂不支持脱机一键
   · apatch —— kptools-linux 打 boot.img 内核（高危），暂不支持

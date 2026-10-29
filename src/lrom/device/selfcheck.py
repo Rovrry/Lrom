@@ -272,7 +272,7 @@ def run_selfcheck() -> list[CheckItem]:
                     "当前用户不在设备访问组中",
                     f"你的组: {', '.join(sorted(groups)) or '未知'}",
                     "sudo usermod -aG plugdev $USER\n"
-                    "    ⚠️ 需要【注销后重新登录】才生效（重新插拔不够）",
+                    "     需要【注销后重新登录】才生效（重新插拔不够）",
                 )
             )
 
@@ -336,10 +336,10 @@ def format_selfcheck(items: list[CheckItem]) -> str:
     from ..cli import C, paint
 
     marks = {
-        Level.OK: ("✓", C.GREEN),
-        Level.WARN: ("!", C.YELLOW),
-        Level.ERROR: ("✗", C.RED),
-        Level.INFO: ("·", C.BLUE),
+        Level.OK: ("通过", C.GREEN),
+        Level.WARN: ("注意", C.YELLOW),
+        Level.ERROR: ("错误", C.RED),
+        Level.INFO: ("信息", C.BLUE),
     }
     lines: list[str] = []
     errors = 0

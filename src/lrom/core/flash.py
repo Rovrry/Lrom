@@ -752,7 +752,7 @@ class FlashExecutor:
     def _flash_other_slot(self, op: FlashOp) -> StepResult | None:
         """把同一镜像再刷到另一个槽位。
 
-        ⚠️ 只用于物理分区。逻辑分区（super 内）绝不能双槽刷写：
+         只用于物理分区。逻辑分区（super 内）绝不能双槽刷写：
         super 是单个物理分区，两个槽位的逻辑分区共用同一空间。
         双槽刷写会让空间需求翻倍，必然触发
         "Not enough space to resize partition"。
@@ -1170,13 +1170,13 @@ def dry_run_report(plan: FlashPlan, image_dir: Path) -> str:
     lines.append("【镜像完整性】")
     if missing or empty:
         if missing:
-            lines.append(f"  ✗ 缺失 {len(missing)} 个: {', '.join(missing[:5])}")
+            lines.append(f"   缺失 {len(missing)} 个: {', '.join(missing[:5])}")
         if empty:
-            lines.append(f"  ✗ 空文件 {len(empty)} 个: {', '.join(empty[:5])}")
+            lines.append(f"   空文件 {len(empty)} 个: {', '.join(empty[:5])}")
         lines.append("  → 现在刷会失败，请先重新解包")
     else:
         total_files = len([op for op in active if op.image])
-        lines.append(f"  ✓ {total_files} 个镜像文件全部存在且非空")
+        lines.append(f"   {total_files} 个镜像文件全部存在且非空")
 
     # ---- 3. 风险项 ----
     lines.append("")
@@ -1185,7 +1185,7 @@ def dry_run_report(plan: FlashPlan, image_dir: Path) -> str:
     blocked = [op.partition for op in plan.ops if op.skip and op.risk is Risk.BLOCKED]
 
     if not danger and not blocked:
-        lines.append("  ✓ 无风险项")
+        lines.append("   无风险项")
     if danger:
         lines.append(
             f"  ! {len(danger)} 个 bootloader 链分区将被写入："
@@ -1202,9 +1202,9 @@ def dry_run_report(plan: FlashPlan, image_dir: Path) -> str:
     skipped_parts = [op.partition for op in plan.ops if op.skip]
     active_names = {op.partition for op in active}
     if "userdata" in active_names:
-        lines.append("  ✗ userdata 将被刷写 —— 会清空所有用户数据")
+        lines.append("   userdata 将被刷写 —— 会清空所有用户数据")
     else:
-        lines.append("  ✓ 不会动 userdata，用户数据保留")
+        lines.append("   不会动 userdata，用户数据保留")
 
     if skipped_parts:
         lines.append(
@@ -1216,11 +1216,11 @@ def dry_run_report(plan: FlashPlan, image_dir: Path) -> str:
     lines.append("")
     lines.append("【结论】")
     if missing or empty:
-        lines.append("  ✗ 现在不能刷 —— 镜像不完整")
+        lines.append("   现在不能刷 —— 镜像不完整")
     elif plan.blocked_ops:
-        lines.append("  ✓ 可以刷（部分保护分区会跳过）")
+        lines.append("   可以刷（部分保护分区会跳过）")
     else:
-        lines.append("  ✓ 可以安全刷写")
+        lines.append("   可以安全刷写")
 
     return "\n".join(lines)
 
@@ -1338,7 +1338,7 @@ def repair_fbd(
             "请自行确认此 recovery.img 与设备固件版本匹配。"
         )
     for w in res.warnings:
-        note("⚠ " + w)
+        note(" " + w)
 
     if dry_run:
         note("[预演] 将执行：fastboot flash recovery <recovery.img> 后 reboot fastboot 验证。")
@@ -1359,14 +1359,14 @@ def repair_fbd(
         note("提示：刷错/不匹配的 recovery 一般不会硬砖（bootloader 仍在），可换正确版本 recovery 重刷。")
         return res
     res.flashed = True
-    note("✓ recovery 已刷入。")
+    note(" recovery 已刷入。")
 
     # 6) reboot fastboot 验证
     note("正在 reboot fastboot 验证 fastbootd…")
     if _probe_fbd_reachable(fb, timeout=90.0):
         res.ok = True
         res.verified_fbd = True
-        note("✓ FastbootD 已恢复（is-userspace=yes）。修复成功。")
+        note(" FastbootD 已恢复（is-userspace=yes）。修复成功。")
     else:
         res.error = "recovery 已刷入，但仍未能进入 FastbootD。"
         note(res.error)

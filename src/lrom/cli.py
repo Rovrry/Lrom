@@ -5,9 +5,11 @@ from __future__ import annotations
 import argparse
 import shutil
 import sys
+import time
 from pathlib import Path
 
 from . import __version__
+from .ui import format_bytes, format_duration, status
 from .core.package import (
     PackageInfo,
     Severity,
@@ -27,16 +29,34 @@ class C:
     BLUE = "\033[34m"
     MAGENTA = "\033[35m"
     CYAN = "\033[36m"
+    BLACK = "\033[30m"
+    WHITE = "\033[97m"
+    # 文字底色（背景）
+    BG_RED = "\033[41m"
+    BG_GREEN = "\033[42m"
+    BG_YELLOW = "\033[43m"
+    BG_BLUE = "\033[44m"
+    BG_MAGENTA = "\033[45m"
+    BG_CYAN = "\033[46m"
+    BG_WHITE = "\033[47m"
 
 
 def _use_color() -> bool:
     return sys.stdout.isatty()
 
 
+def _style_to_bg(style: str) -> str:
+    """只把**红色**前景改成红色文字底色（重要提示 / 报错）。
+
+    本轮要求「只保留红色底色」：绿/黄/蓝等仍作普通前景色，不再铺底色。
+    """
+    return style.replace(C.RED, C.BG_RED + C.WHITE)
+
+
 def paint(text: str, color: str) -> str:
     if not _use_color():
         return text
-    return f"{color}{text}{C.RESET}"
+    return f"{_style_to_bg(color)}{text}{C.RESET}"
 
 
 SEVERITY_STYLE = {
@@ -186,7 +206,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--partitions",
         nargs="+",
         default=None,
-        help="要备份的分区（默认: boot init_boot vbmeta 等关键分区）",
+        help="只备份指定分区（省略则默认全备份：设备上全部实际分区，排除 userdata/cache）",
     )
     pb.add_argument("-o", "--output", default="backups", help="备份根目录（默认 backups/）")
     pb.add_argument("--adb-port", type=int, default=None, help="adb server 端口")
@@ -432,7 +452,7 @@ if __name__ == "__main__":
 
 
 def cmd_backup(args: argparse.Namespace) -> int:
-    """刷前备份关键分区。"""
+    """备份设备分区：**默认全量备份**（全部实际分区），也可用 --partitions 指定。"""
     from .core import backup as bk
     from .device.discover import DeviceMode, detect
     from .device.runner import AdbRunner
@@ -450,7 +470,7 @@ def cmd_backup(args: argparse.Namespace) -> int:
 
     root_prefix = bk.detect_root_prefix(adb)
     if root_prefix is None:
-        print(paint("✗ 未检测到 root，无法备份。", C.RED + C.BOLD))
+        print(paint(" 未检测到 root，无法备份。", C.RED + C.BOLD))
         print()
         print("  备份需要读取 /dev/block/by-name/*（需 uid=0）。普通 adb shell 是")
         print("  普通用户，读不到。请在 root 管理器里【给 shell 授予 root 权限】：")
@@ -459,22 +479,35 @@ def cmd_backup(args: argparse.Namespace) -> int:
         print()
         print("  说明：fastboot fetch 一加机型基本不支持，不能作为替代方案。")
         return 1
-    print(paint(f"✓ root 权限可用（{root_prefix}）", C.GREEN))
+    print(paint(f" root 权限可用（{root_prefix}）", C.GREEN))
 
-    from .core.backup import DEFAULT_BACKUP_PARTITIONS
+    # ── 默认全备份：枚举设备实际存在的全部分区（排除 userdata/cache）──
+    if args.partitions:
+        parts = list(args.partitions)
+        full_mode = False
+        scope = "指定分区"
+    else:
+        parts = bk.list_device_partitions(adb, root_prefix)
+        full_mode = True
+        scope = "全部分区（默认全备份，排除 userdata/cache）"
+        if not parts:
+            # 读不到分区表时退回精选清单，至少保证能备份关键分区
+            parts = list(bk.DEFAULT_BACKUP_PARTITIONS)
+            scope = "关键分区（读不到分区表，已退回精选清单）"
+            print(paint(f"  ! {scope}", C.YELLOW))
 
-    parts = list(args.partitions or DEFAULT_BACKUP_PARTITIONS)
     out_dir = bk.new_session_dir(Path(args.output), dev)
 
     needed = bk.estimate_size(adb, parts, dev.slot)
     ok, msg = bk.check_space(out_dir, needed)
-    print(f"  预计需要 {needed / 2**30:.2f} GB，{msg}")
-    if not ok:
-        print(paint(f"  {msg}", C.RED))
-        return 1
-
     print()
-    print(paint(f"备份到: {out_dir}", C.BOLD))
+    print("  " + status("info", "开始备份"))
+    print(f"  备份范围 : {scope}（{len(parts)} 个分区）")
+    print(f"  输出目录 : {out_dir}")
+    print(f"  预计大小 : {needed / 2**30:.2f} GB（{msg}）")
+    if not ok:
+        print("  " + status("error", msg))
+        return 1
     print()
 
     session = bk.BackupSession(
@@ -485,21 +518,43 @@ def cmd_backup(args: argparse.Namespace) -> int:
         ).isoformat(),
     )
 
-    critical = [p for p in parts if p not in bk.OPTIONAL_PARTITIONS]
+    if full_mode:
+        # 全备份时只看「关键分区」是否失败：个别冷门分区读不到不算致命，
+        # 只作为提示列出，避免一次完整的全备份因某个非关键节点被整体判失败。
+        critical = [
+            p for p in parts
+            if p in bk.DEFAULT_BACKUP_PARTITIONS and p not in bk.OPTIONAL_PARTITIONS
+        ]
+    else:
+        critical = [p for p in parts if p not in bk.OPTIONAL_PARTITIONS]
+
+    overall_start = time.monotonic()
+
+    def _live(name: str, done: int, total: int, elapsed: float) -> None:
+        total_txt = format_bytes(total) if total else "?"
+        print(
+            f"\r  {name:<18} 备份中… {format_bytes(done):>9} / {total_txt:<9}"
+            f"  已用 {format_duration(elapsed)}   ",
+            end="",
+            flush=True,
+        )
 
     for part in parts:
-        print(f"  {part:<18}", end="", flush=True)
         result = bk.backup_partition_adb(
-            adb, part, out_dir / f"{part}.img", slot=dev.slot, root_prefix=root_prefix
+            adb, part, out_dir / f"{part}.img", slot=dev.slot,
+            root_prefix=root_prefix, on_progress=_live,
         )
         session.results.append(result)
+        print("\r" + " " * 80 + "\r", end="", flush=True)
         if result.ok:
-            print(paint(f"✓ {result.size_mb:>8,.1f} MB", C.GREEN))
+            print(f"  {part:<18} {status('ok', '完成')} {result.size_mb:>8,.1f} MB")
         elif result.missing or part in bk.OPTIONAL_PARTITIONS:
             # 不同机型的分区集合不同（如某些机型无 fsg/fsc），跳过不算失败
-            print(paint(f"· 跳过（本机无此分区）", C.DIM))
+            print(f"  {part:<18} {status('note', '跳过')} 本机无此分区")
         else:
-            print(paint(f"✗ {result.error}", C.RED))
+            print(f"  {part:<18} {status('error', '失败')} {result.error}")
+
+    total_elapsed = time.monotonic() - overall_start
 
     manifest = bk.write_manifest(session)
     print()
@@ -519,34 +574,51 @@ def cmd_backup(args: argparse.Namespace) -> int:
         r for r in session.results
         if not r.ok and not r.missing and r.partition in critical
     ]
+    failed_other = [
+        r for r in session.results
+        if not r.ok and not r.missing and r.partition not in critical
+    ]
 
     print()
     if not failed_critical:
         extra = f"，跳过 {len(skipped)} 个（本机无）" if skipped else ""
         print(
-            paint(
-                f"✓ 备份完成（{len(ok_parts)} 个分区{extra}）",
-                C.GREEN + C.BOLD,
+            "  "
+            + status(
+                "ok",
+                f"备份完成（{len(ok_parts)} 个分区{extra}，用时 {format_duration(total_elapsed)}）",
             )
         )
+        if failed_other:
+            print(
+                "  "
+                + status(
+                    "warn",
+                    f"{len(failed_other)} 个非关键分区未能备份（不影响刷机退路）：",
+                )
+            )
+            for r in failed_other[:8]:
+                print(f"    · {r.partition}: {r.error}")
+            if len(failed_other) > 8:
+                print(f"    … 其余 {len(failed_other) - 8} 个见 backup.json")
         # OCDT 单独强调 —— 它是唯一「丢了就救不回来」的分区
         if any(r.partition == "engineering_cdt" and r.ok for r in session.results):
             print()
             print(
-                paint(
-                    "  ★ engineering_cdt（OCDT）已备份。",
-                    C.GREEN,
+                "  "
+                + status(
+                    "important",
+                    "engineering_cdt（OCDT）已备份 —— 这份文件本机独有，务必另存 U 盘/云盘",
                 )
             )
-            print("    这份文件是本机独有的 —— 恢复时**必须**用它，")
-            print("    用别的设备的 OCDT 会导致进不了 Fastboot。")
-            print("    建议另存到 U 盘/云盘，不要只留在这台电脑上。")
+            print("    恢复时**必须**用本机的 OCDT；用别机的 OCDT 会导致进不了 Fastboot。")
         return 0
 
     print(
-        paint(
-            f"✗ 关键分区备份失败: {', '.join(r.partition for r in failed_critical)}",
-            C.RED + C.BOLD,
+        "  "
+        + status(
+            "error",
+            f"关键分区备份失败: {', '.join(r.partition for r in failed_critical)}",
         )
     )
     print()
@@ -577,13 +649,13 @@ def cmd_fulldump(args: argparse.Namespace) -> int:
 
     root_prefix = bk.detect_root_prefix(adb)
     if root_prefix is None:
-        print(paint("✗ 未检测到 root，无法做字库备份。", C.RED + C.BOLD))
+        print(paint(" 未检测到 root，无法做字库备份。", C.RED + C.BOLD))
         print()
         print("  读取 /dev/block 需要 uid=0。请在 root 管理器里【给 shell 授予 root 权限】：")
         print("    · Magisk / KernelSU / SukiSU / APatch → 超级用户 → 授权「Shell」")
         print("    · 自检：adb shell su -c id 应返回 uid=0")
         return 1
-    print(paint(f"✓ root 权限可用（{root_prefix}）", C.GREEN))
+    print("  " + status("ok", f"root 权限可用（{root_prefix}）"))
 
     exclude = set(fd.DEFAULT_EXCLUDE)
     if args.include_super:
@@ -593,36 +665,58 @@ def cmd_fulldump(args: argparse.Namespace) -> int:
     exclude = frozenset(exclude)
 
     out_root = Path(args.output)
-    out_dir = out_root / f"{dev.codename or 'unknown'}_fulldump_{_stamp()}"
+    # 目录名 = 机型_日期（如 OPD2404_20261029-013451），便于事后按机型/时间辨认
+    out_dir = out_root / f"{bk.device_label(dev)}_{_stamp()}"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     print()
-    print(paint(f"字库备份到: {out_dir}", C.BOLD))
-    print(f"  排除分区: {', '.join(sorted(exclude)) or '（无）'}")
+    print("  " + status("info", "开始全量备份"))
+    print(f"  输出目录 : {out_dir}")
+    print(f"  备份范围 : 设备全部分区（排除 {', '.join(sorted(exclude)) or '无'}）+ 主/备 GPT + RawProgram XML")
     print()
 
-    def on_result(name: str, ok: bool, detail: str) -> None:
-        mark = paint("✓", C.GREEN) if ok else paint("✗", C.RED)
-        print(f"  {name:<24} {mark} {detail}")
+    overall_start = time.monotonic()
+
+    def _live(name: str, done: int, total: int, elapsed: float) -> None:
+        total_txt = format_bytes(total) if total else "?"
+        print(
+            f"\r  {name:<20} 备份中… {format_bytes(done):>9} / {total_txt:<9}"
+            f"  已用 {format_duration(elapsed)}   ",
+            end="",
+            flush=True,
+        )
+
+    def on_result(name: str, ok: bool, detail: str, elapsed: float = 0.0) -> None:
+        print("\r" + " " * 80 + "\r", end="", flush=True)
+        tag = status("ok", "完成") if ok else status("error", "失败")
+        print(f"  {name:<20} {tag} {detail:>12}   用时 {format_duration(elapsed)}")
+
+    def on_notice(msg: str) -> None:
+        print("  " + status("note", msg))
 
     try:
         res = fd.full_dump(
             adb, out_dir, root_prefix=root_prefix, exclude=exclude,
-            on_result=on_result, on_notice=lambda m: print(paint(f"  {m}", C.DIM)),
+            on_result=on_result, on_notice=on_notice, on_progress=_live,
+            meta={
+                "device": bk.snapshot_device(adb, dev),
+                "created_at": __import__("datetime").datetime.now().astimezone().isoformat(),
+            },
         )
     except Exception as exc:  # noqa: BLE001
-        print(paint(f"✗ 字库备份失败：{exc}", C.RED))
+        print("  " + status("error", f"字库备份失败：{exc}"))
         return 1
 
+    total_elapsed = time.monotonic() - overall_start
     print()
     for w in res.warnings:
-        print(paint(f"  ⚠ {w}", C.YELLOW))
+        print("  " + status("warn", w))
     print()
     print(f"  已回读 : {len(res.dumped)} 个分区")
     if res.skipped:
         print(f"  已排除 : {len(res.skipped)} 个（{' '.join(res.skipped[:6])}…）")
     if res.failed:
-        print(paint(f"  失败   : {len(res.failed)} 个", C.RED))
+        print("  " + status("error", f"失败 {len(res.failed)} 个"))
         for name, err in list(res.failed.items())[:5]:
             print(f"    · {name}: {err}")
     if res.gpt_files:
@@ -630,14 +724,22 @@ def cmd_fulldump(args: argparse.Namespace) -> int:
     if res.xml_files:
         print(f"  刷写脚本: {', '.join(p.name for p in res.xml_files)}")
     print(f"  清单   : {out_dir / 'disk_info.json'}")
+    print(f"  总用时 : {format_duration(total_elapsed)}")
     print()
 
     if res.ok:
-        print(paint("✓ 字库备份完成", C.GREEN + C.BOLD))
-        print("  说明：RawProgram XML 为 EDL/编程器刷写脚本；LUN 编号按 sd 字母顺序推定，")
-        print("        实际刷写前务必核对（不同机型 LUN 编号可能不同）。")
+        print(
+            "  "
+            + status(
+                "ok",
+                f"全量备份完成（{len(res.dumped)} 个分区，用时 {format_duration(total_elapsed)}）",
+            )
+        )
+        print(f"  输出   : {out_dir}")
+        print("  说明   : RawProgram XML 为 EDL/编程器刷写脚本；LUN 编号按 sd 字母顺序推定，")
+        print("           实际刷写前务必核对（不同机型 LUN 编号可能不同）。")
         return 0
-    print(paint("✗ 字库备份未完整完成", C.RED + C.BOLD))
+    print("  " + status("error", "全量备份未完整完成，请查看上方失败项"))
     return 1
 
 
@@ -657,7 +759,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
 
     info = inspect_package(args.package)
     if info.verdict is not Verdict.FLASHABLE or info.manifest is None:
-        print(paint(f"✗ 该包不能线刷: {info.verdict.value}", C.RED + C.BOLD))
+        print(paint(f" 该包不能线刷: {info.verdict.value}", C.RED + C.BOLD))
         for f in info.findings:
             if f.severity in (Severity.BLOCKER, Severity.DANGER):
                 print(f"  {f.message}")
@@ -677,7 +779,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
         codename=(getattr(dev, "codename", None) if dev else None) or info.pre_device,
     )
     if _arb.risk is _ArbRisk.BLOCK:
-        print(paint("✗ ARB 熔断保护：预演不通过", C.RED + C.BOLD))
+        print(paint(" ARB 熔断保护：预演不通过", C.RED + C.BOLD))
         print()
         print(f"  {_arb.message}")
         print()
@@ -696,18 +798,18 @@ def cmd_plan(args: argparse.Namespace) -> int:
                 paint("  !! 无法确认 Bootloader 是否已解锁", C.YELLOW)
             )
         elif str(dev.locked) != "0":
-            print(paint("✗ Bootloader 未解锁，无法刷写", C.RED + C.BOLD))
+            print(paint(" Bootloader 未解锁，无法刷写", C.RED + C.BOLD))
             print("  预演不通过：即使现在生成计划，真正刷写时也会被拒绝。")
             return 1
         else:
-            print(paint("  ✓ Bootloader 已解锁", C.GREEN))
+            print(paint("   Bootloader 已解锁", C.GREEN))
 
     device_parts: set[str] = set()
     if dev and dev.mode is DeviceMode.ADB:
         findings = check_device_match(info, dev.codename or "", dev.model)
         blockers = [f for f in findings if f.severity is Severity.BLOCKER]
         if blockers:
-            print(paint("✗ 型号不匹配，拒绝生成计划", C.RED + C.BOLD))
+            print(paint(" 型号不匹配，拒绝生成计划", C.RED + C.BOLD))
             for f in blockers:
                 print(f"  {f.message}")
             return 1
@@ -745,7 +847,7 @@ def cmd_unpack(args: argparse.Namespace) -> int:
 
     info = inspect_package(args.package)
     if info.verdict is not Verdict.FLASHABLE or info.manifest is None:
-        print(paint(f"✗ 该包不能解包: {info.verdict.value}", C.RED + C.BOLD))
+        print(paint(f" 该包不能解包: {info.verdict.value}", C.RED + C.BOLD))
         for f in info.findings:
             if f.severity in (Severity.BLOCKER, Severity.DANGER):
                 print(f"  {f.message}")
@@ -773,7 +875,7 @@ def cmd_unpack(args: argparse.Namespace) -> int:
         if free < need_with_margin:
             print(
                 paint(
-                    "✗ 磁盘空间不足，解包会中途失败",
+                    " 磁盘空间不足，解包会中途失败",
                     C.RED + C.BOLD,
                 )
             )
@@ -816,9 +918,9 @@ def cmd_unpack(args: argparse.Namespace) -> int:
     def on_result(res) -> None:
         print("\r" + " " * 70, end="\r")
         if res.ok:
-            print(f"  {res.partition:<18} {paint('✓', C.GREEN)} {res.size_mb:>9,.1f} MB")
+            print(f"  {res.partition:<18} {status('ok', '完成')} {res.size_mb:>9,.1f} MB")
         else:
-            print(f"  {res.partition:<18} {paint('✗', C.RED)} {res.error}")
+            print(f"  {res.partition:<18} {status('error', '失败')} {res.error}")
 
     started = _time.time()
     results = unpack_package(
@@ -854,13 +956,13 @@ def cmd_unpack(args: argparse.Namespace) -> int:
     print()
 
     if bad:
-        print(paint(f"✗ {len(bad)} 个分区解包失败", C.RED + C.BOLD))
+        print(paint(f" {len(bad)} 个分区解包失败", C.RED + C.BOLD))
         for r in bad:
             print(f"  {r.partition}: {r.error}")
         return 1
 
     total_gb = sum(r.size for r in ok) / 2**30
-    print(paint(f"✓ 解包完成：{len(ok)} 个分区，{total_gb:.2f} GB", C.GREEN + C.BOLD))
+    print(paint(f" 解包完成：{len(ok)} 个分区，{total_gb:.2f} GB", C.GREEN + C.BOLD))
     return 0
 
 
@@ -883,19 +985,19 @@ def cmd_flash(args: argparse.Namespace) -> int:
     # ---- 1) 包校验 ----
     info = inspect_package(args.package)
     if info.verdict is not Verdict.FLASHABLE or info.manifest is None:
-        print(paint(f"✗ 该包不能线刷: {info.verdict.value}", C.RED + C.BOLD))
+        print(paint(f" 该包不能线刷: {info.verdict.value}", C.RED + C.BOLD))
         return 1
 
     image_dir = Path(args.images)
     if not image_dir.exists():
-        print(paint(f"✗ 镜像目录不存在: {image_dir}", C.RED))
+        print(paint(f" 镜像目录不存在: {image_dir}", C.RED))
         print(f"  请先运行: lrom unpack {args.package} -o {image_dir}")
         return 1
 
     # ---- 2) 设备探测 ----
     dev = detect(adb_server_port=args.adb_port)
     if not dev:
-        print(paint("✗ 未检测到设备", C.RED))
+        print(paint(" 未检测到设备", C.RED))
         return 1
 
     # ---- 2.2) 型号一致性检查（必须在 ARB 之前）----
@@ -907,7 +1009,7 @@ def cmd_flash(args: argparse.Namespace) -> int:
         _match = check_device_match(info, dev.codename or "", dev.model)
         _blockers = [f for f in _match if f.severity is Severity.BLOCKER]
         if _blockers:
-            print(paint("✗ 机型与 ROM 包不匹配，拒绝刷写", C.RED + C.BOLD))
+            print(paint(" 机型与 ROM 包不匹配，拒绝刷写", C.RED + C.BOLD))
             print()
             print(f"  设备    : {dev.model or '?'}（代号 {dev.codename or '?'}）")
             if info.product_name:
@@ -935,7 +1037,7 @@ def cmd_flash(args: argparse.Namespace) -> int:
         codename=dev.codename or info.pre_device,
     )
     if arb_result.risk is ArbRisk.BLOCK:
-        print(paint("✗ ARB 熔断保护：拒绝刷写", C.RED + C.BOLD))
+        print(paint(" ARB 熔断保护：拒绝刷写", C.RED + C.BOLD))
         print()
         print(format_arb_check(arb_result))
         print()
@@ -971,7 +1073,7 @@ def cmd_flash(args: argparse.Namespace) -> int:
             )
         )
     elif str(dev.locked) != "0":
-        print(paint("✗ Bootloader 未解锁，拒绝刷写", C.RED + C.BOLD))
+        print(paint(" Bootloader 未解锁，拒绝刷写", C.RED + C.BOLD))
         print()
         print("  设备当前处于已锁定状态，无法写入任何分区。")
         print()
@@ -986,7 +1088,7 @@ def cmd_flash(args: argparse.Namespace) -> int:
         print()
         return 1
     else:
-        print(paint("  ✓ Bootloader 已解锁", C.GREEN))
+        print(paint("   Bootloader 已解锁", C.GREEN))
 
     device_parts: set[str] = set()
     if dev.mode is DeviceMode.ADB:
@@ -1029,9 +1131,9 @@ def cmd_flash(args: argparse.Namespace) -> int:
         print(paint(f"  切换活动槽 {cur_slot} → {_target_slot}…", C.CYAN))
         _sw = fb_early.run(f"--set-active={_target_slot}", timeout=120)
         if not fb_early.ok(_sw):
-            print(paint(f"  ⛔ 切换槽位失败：{_sw.combined.strip()[:200]}", C.RED))
+            print(paint(f"   切换槽位失败：{_sw.combined.strip()[:200]}", C.RED))
             return 1
-        print(f"  {paint('✓', C.GREEN)} 已切到 {_target_slot} 槽，将刷入该槽")
+        print("  " + status("ok", f"已切到 {_target_slot} 槽，将刷入该槽"))
 
     plan = build_plan(
         info.manifest,
@@ -1066,7 +1168,7 @@ def cmd_flash(args: argparse.Namespace) -> int:
     issues = preflight(plan, image_dir, device_parts or None, super_size)
     errors = [i for i in issues if i.severity == "error"]
     if errors:
-        print(paint("✗ 前置检查未通过", C.RED + C.BOLD))
+        print(paint(" 前置检查未通过", C.RED + C.BOLD))
         for i in errors:
             print(f"  {i.message}")
         return 1
@@ -1104,7 +1206,7 @@ def cmd_flash(args: argparse.Namespace) -> int:
     arb_cmp = compare_arb(pkg_arb, dev_arb)
     if arb_cmp.verdict is ArbVerdict.BRICK and not getattr(args, "force_arb", False):
         print()
-        print(paint("✗ ARB 熔断检测未通过：此包会导致硬砖", C.RED + C.BOLD))
+        print(paint(" ARB 熔断检测未通过：此包会导致硬砖", C.RED + C.BOLD))
         print(f"  包内 ARB      : {pkg_arb.arb_index if pkg_arb else '?'}")
         print(f"  设备已熔断 ARB: {dev_arb.arb_index if dev_arb else '?'}")
         print()
@@ -1149,15 +1251,15 @@ def cmd_flash(args: argparse.Namespace) -> int:
     # ---- 6) 确认 ----
     if not dry_run and not args.yes:
         print()
-        print(paint("⚠️  这将实际写入设备，可能变砖。", C.RED + C.BOLD))
+        print(paint("  这将实际写入设备，可能变砖。", C.RED + C.BOLD))
         if getattr(args, "wipe", False):
             print(paint("    数据策略：将清空所有用户数据！", C.RED + C.BOLD))
         else:
             print("    数据策略：保留用户数据（升级模式）")
             print(
                 paint(
-                    "    注意：如果这是降级包，保留数据会无法开机，"
-                    "降级必须加 --wipe",
+                    "    注意：如果是降级或救砖，保留数据会因加密密钥不匹配而无法开机，"
+                    "需清空用户数据（--wipe，即格式化数据分区）",
                     C.YELLOW,
                 )
             )
@@ -1256,23 +1358,23 @@ def cmd_flash(args: argparse.Namespace) -> int:
             done_bytes += sr.size
             pct = done_bytes / total_bytes * 100 if total_bytes else 0
             print(
-                f"  {sr.partition:<18}{paint('✓', C.GREEN)} "
+                f"  {sr.partition:<18}{status('ok', '完成')} "
                 f"{sr.size_mb:>9,.1f} MB  {sr.duration:>6.1f}s  [{pct:5.1f}%]"
             )
         elif sr.status is StepStatus.SKIPPED:
             print(f"  {sr.partition:<18}{paint('·', C.DIM)} {sr.message}")
         elif sr.status is StepStatus.LOCKED:
-            print(f"  {sr.partition:<18}{paint('🔒', C.YELLOW)} 关键分区未解锁，跳过")
+            print(f"  {sr.partition:<18}{status('warn', '跳过')} 关键分区未解锁")
             done_bytes += sr.size
         else:
-            print(f"  {sr.partition:<18}{paint('✗', C.RED)} {sr.message}")
+            print(f"  {sr.partition:<18}{status('error', '失败')} {sr.message}")
 
     executor.on_step = on_step
 
     try:
         result = executor.run()
     except KeyboardInterrupt:
-        print(paint("\n\n⚠️  用户中断", C.YELLOW))
+        print(paint("\n\n  用户中断", C.YELLOW))
         return 130
 
     # ---- 8) 汇总 ----
@@ -1284,16 +1386,20 @@ def cmd_flash(args: argparse.Namespace) -> int:
     print()
 
     if dry_run:
-        print(paint("✓ 预演完成，未写入设备", C.GREEN + C.BOLD))
+        print(paint(" 预演完成，未写入设备", C.GREEN + C.BOLD))
         return 0
 
     if result.ok:
-        print(paint("✓ 刷写完成", C.GREEN + C.BOLD))
+        print(paint(" 刷写完成", C.GREEN + C.BOLD))
         print()
-        _print_after_flash_notice(arb_cmp, wipe=getattr(args, "wipe", False))
+        _print_after_flash_notice(
+            arb_cmp,
+            wipe=getattr(args, "wipe", False),
+            rescue=getattr(args, "fbd_only", False),
+        )
         return 0
 
-    print(paint("✗ 刷写失败", C.RED + C.BOLD))
+    print(paint(" 刷写失败", C.RED + C.BOLD))
     print()
     print("恢复建议:")
     print("  · 设备应仍在 fastboot/fastbootd，可重新运行本命令")
@@ -1302,34 +1408,55 @@ def cmd_flash(args: argparse.Namespace) -> int:
     return 1
 
 
-def _print_after_flash_notice(arb_cmp, *, wipe: bool) -> None:
-    """刷写完成后的提示。强调：不自动重启、降级必须格式化。
+def _print_after_flash_notice(arb_cmp, *, wipe: bool, rescue: bool = False) -> None:
+    """刷写完成后的提示（务必在首次开机前阅读）。
 
-    Lrom 刻意不自动重启设备 —— 重启决策权必须留给用户，
-    尤其是在降级场景下，先重启会绕过格式化步骤导致无法开机。
+    关键纠正：降级 / 救砖后要清的是**数据分区（userdata / data）**，即
+    「格式化数据分区 / 清除数据 / 恢复出厂」，**不是「格式化系统分区」**——
+    system/vendor 是 super 内逻辑分区，已由本次刷包覆盖，单独格式化无效且危险。
+    时机：刷写完成之后、首次开机进系统之前。
     """
     from .core.arb import ArbVerdict
 
-    print(paint("╭─ 后续操作（请务必阅读）" + "─" * 24, C.YELLOW + C.BOLD))
+    print(paint("╭─ 后续操作（请务必阅读）" + "─" * 24, C.BOLD))
 
-    is_downgrade_risk = arb_cmp is not None and arb_cmp.verdict in (
-        ArbVerdict.SAFE,
-        ArbVerdict.BRICK,
-        ArbVerdict.UNKNOWN,
-    )
+    if wipe:
+        print("│")
+        print(paint("│ 本次刷写已执行「清空用户数据」（fastboot -w）。", C.BOLD))
+        print("│ 若首次开机卡在开机动画 / 提示加密失败，请进入 Recovery：")
+        print(
+            paint(
+                "│   格式化数据分区 / 清除数据（会连 metadata 一起重置，最彻底）",
+                C.RED + C.BOLD,
+            )
+        )
+    else:
+        print("│")
+        print(paint("│ 【重要】本次保留了用户数据。", C.BOLD))
+        print("│ 如果这次是「降级」或「救砖」，请在首次开机前格式化数据分区，")
+        print(
+            paint(
+                "│ 否则会因数据加密密钥不匹配而卡开机 / 反复重启"
+                "（要格的是数据分区，不是系统分区）",
+                C.RED + C.BOLD,
+            )
+        )
+        print("│")
+        print("│ 做法（二选一）：")
+        print("│   1) 仍在 fastboot / fastbootd：执行  fastboot -w")
+        print("│      （= 擦除并格式化 userdata + cache）")
+        print("│   2) 或重启进入 Recovery →「清除数据 / 格式化数据分区」→ 再开机")
+        print("│      （最彻底，会连 metadata 一起清）")
 
-    if not wipe:
+    if rescue:
         print("│")
-        print(paint("│ ⚠️  若是降级（刷入的系统版本低于原版本）：", C.RED + C.BOLD))
-        print(paint("│    必须先格式化系统分区（清除用户数据），", C.RED))
-        print(paint("│    否则会无法开机甚至变砖！", C.RED + C.BOLD))
-        print("│")
-        print("│    正确做法（二选一）：")
-        print("│      1) 在 Fastboot 下执行:")
-        print("│           fastboot -w")
-        print("│      2) 或进入 Recovery，选择「格式化 data / 恢复出厂设置」")
-        print("│")
-        print("│    本次刷写保留了用户数据（升级场景）。")
+        print(
+            paint(
+                "│ 救砖（仅FBD）后强烈建议格式化数据分区："
+                "旧数据与新系统不匹配会无法开机。",
+                C.RED + C.BOLD,
+            )
+        )
 
     if arb_cmp is not None and arb_cmp.verdict is ArbVerdict.UPGRADE:
         print("│")
@@ -1337,11 +1464,11 @@ def _print_after_flash_notice(arb_cmp, *, wipe: bool) -> None:
 
     print("│")
     print(paint("│ Lrom 不会自动重启设备。", C.BOLD))
-    print("│ 请确认以上事项后再手动重启：")
+    print("│ 完成上述「格式化数据分区」后，再手动重启：")
     print("│    fastboot reboot          # 当前在 fastboot")
     print("│    或长按电源键 10 秒")
     print("│")
-    print(paint("╰" + "─" * 44, C.YELLOW + C.BOLD))
+    print(paint("╰" + "─" * 44, C.BOLD))
     print()
 
 
@@ -1352,7 +1479,7 @@ def _print_lock_device_prompt() -> None:
     需要用户用音量键选择、电源键确认。Lrom 在这里卡住等，不是死机。
     """
     print()
-    print(paint("  ⚠ 请立即看设备屏幕：bootloader 会弹出确认界面", C.YELLOW + C.BOLD))
+    print(paint("   请立即看设备屏幕：bootloader 会弹出确认界面", C.YELLOW + C.BOLD))
     print("     · 屏幕上会出现           do not lock the bootloader")
     print("                              lock the bootloader")
     print("     · 用【音量键】选到      lock the bootloader（第二个/下方）")
@@ -1366,7 +1493,7 @@ def _print_lock_device_prompt() -> None:
 def _print_unlock_device_prompt() -> None:
     """提示用户在设备端确认解锁（bootloader 物理确认界面）。"""
     print()
-    print(paint("  ⚠ 请立即看设备屏幕：bootloader 会弹出确认界面", C.YELLOW + C.BOLD))
+    print(paint("   请立即看设备屏幕：bootloader 会弹出确认界面", C.YELLOW + C.BOLD))
     print("     · 屏幕上会出现           Do not unlock the bootloader")
     print("                              Unlock the bootloader")
     print("     · 用【音量键】选到      Unlock the bootloader（第二个/下方）")
@@ -1423,21 +1550,21 @@ def cmd_unlock(args: argparse.Namespace) -> int:
     )
 
     if readiness is UnlockReadiness.NO_DEVICE:
-        print(paint("  ⛔ 未检测到设备", C.RED + C.BOLD))
+        print(paint("   未检测到设备", C.RED + C.BOLD))
         print("     请连接设备并进入 fastboot 模式：adb reboot bootloader")
         print()
         return 1
     if readiness is UnlockReadiness.NOT_FASTBOOT:
-        print(paint(f"  ⛔ 设备不在 fastboot 模式（{dev.mode.value}）", C.RED + C.BOLD))
+        print(paint(f"   设备不在 fastboot 模式（{dev.mode.value}）", C.RED + C.BOLD))
         print("     请执行：adb reboot bootloader")
         print()
         return 1
     if readiness is UnlockReadiness.LOCK_STATE_UNKNOWN:
-        print(paint("  ⛔ 无法确认 Bootloader 锁状态", C.RED + C.BOLD))
+        print(paint("   无法确认 Bootloader 锁状态", C.RED + C.BOLD))
         print()
         return 1
     if readiness is UnlockReadiness.ALREADY_UNLOCKED:
-        print(paint("  ✓ 设备已是解锁状态，无需重复解锁", C.GREEN + C.BOLD))
+        print(paint("   设备已是解锁状态，无需重复解锁", C.GREEN + C.BOLD))
         print()
         return 0
 
@@ -1470,7 +1597,7 @@ def cmd_unlock(args: argparse.Namespace) -> int:
     res = fb.run(*plan.unlock_command, timeout=300)
     if not fb.ok(res):
         out = res.combined.strip()
-        print(paint(f"  ⛔ 解锁命令失败：{out[:300]}", C.RED + C.BOLD))
+        print(paint(f"   解锁命令失败：{out[:300]}", C.RED + C.BOLD))
         print()
         print("     常见原因：")
         print("       · 设备端选了 Do not unlock（取消了）→ 可重跑本命令")
@@ -1481,7 +1608,7 @@ def cmd_unlock(args: argparse.Namespace) -> int:
         return 1
 
     print()
-    print(paint("  ✓ 解锁成功。设备会清空数据并重启。", C.GREEN + C.BOLD))
+    print(paint("   解锁成功。设备会清空数据并重启。", C.GREEN + C.BOLD))
     print("     首次开机较慢（重新加密数据），属正常现象。")
     print()
     return 0
@@ -1520,7 +1647,7 @@ def cmd_relock(args: argparse.Namespace) -> int:
     print()
 
     # ---- 0) 绝对确认：回锁不可逆，输错就砖 ----
-    print(paint("  ⚠ 这是最高风险操作。回锁的前提是：两个槽里的关键分区", C.RED + C.BOLD))
+    print(paint("   这是最高风险操作。回锁的前提是：两个槽里的关键分区", C.RED + C.BOLD))
     print(paint("    都是本机的原厂签名镜像（不是 root / 三方 ROM / 跨区包）。", C.RED + C.BOLD))
     print(paint("    否则回锁后设备会变砖，且没有解锁通道可自救。", C.RED + C.BOLD))
     print()
@@ -1539,7 +1666,7 @@ def cmd_relock(args: argparse.Namespace) -> int:
     pkg = args.package
     info = inspect_package(pkg)
     if info.verdict is not Verdict.FLASHABLE or info.manifest is None:
-        print(paint(f"  ⛔ 该包不能线刷：{info.verdict.value}", C.RED + C.BOLD))
+        print(paint(f"   该包不能线刷：{info.verdict.value}", C.RED + C.BOLD))
         print("     回锁必须使用完整、可线刷的官方系统包。")
         print()
         return 1
@@ -1550,7 +1677,7 @@ def cmd_relock(args: argparse.Namespace) -> int:
     # ---- 1) 设备状态（先于包适配性检查，因为要用设备机型做比对）----
     dev = detect(adb_server_port=getattr(args, "adb_port", None))
     if dev is None:
-        print(paint("  ⛔ 未检测到设备。", C.RED))
+        print(paint("   未检测到设备。", C.RED))
         print("     回锁需要设备处于 fastboot（bootloader）模式。")
         print()
         return 1
@@ -1559,7 +1686,7 @@ def cmd_relock(args: argparse.Namespace) -> int:
     # 用途：fastboot 下读不到真实机型（只有平台名），需先开机核对一次。
     if getattr(args, "check_model", False):
         if dev.mode is not DeviceMode.ADB:
-            print(paint("  ⚠ --check-model 需在开机（ADB）模式下运行", C.YELLOW))
+            print(paint("   --check-model 需在开机（ADB）模式下运行", C.YELLOW))
             print("     请先开机连上设备再试。")
             print()
             return 1
@@ -1573,31 +1700,31 @@ def cmd_relock(args: argparse.Namespace) -> int:
             device_codename=dev.codename,
         )
         if suit_c is PackageSuitability.OK:
-            print(paint("  ✓ 机型匹配，此包适合本机回锁", C.GREEN + C.BOLD))
+            print(paint("   机型匹配，此包适合本机回锁", C.GREEN + C.BOLD))
             print()
             print("  下一步：")
             print(paint("    adb reboot bootloader", C.CYAN))
             print(paint(f"    ./lrom relock {pkg}", C.CYAN))
             print()
             return 0
-        print(paint("  ⛔ 机型不匹配，此包不能用于本机回锁：", C.RED + C.BOLD))
+        print(paint("   机型不匹配，此包不能用于本机回锁：", C.RED + C.BOLD))
         for r in reasons_c:
             print(f"     · {r}")
         print()
         return 1
 
     if dev.mode is not DeviceMode.FASTBOOT:
-        print(paint(f"  ⛔ 设备当前不在 fastboot 模式（{dev.mode.value}）。", C.RED + C.BOLD))
+        print(paint(f"   设备当前不在 fastboot 模式（{dev.mode.value}）。", C.RED + C.BOLD))
         print("     请执行：adb reboot bootloader")
         print(paint("     提示：可先开机运行 ./lrom relock <包> --check-model 核对机型", C.DIM))
         print()
         return 1
     if dev.locked is None:
-        print(paint("  ⛔ 无法确认 Bootloader 状态，已停止。", C.RED + C.BOLD))
+        print(paint("   无法确认 Bootloader 状态，已停止。", C.RED + C.BOLD))
         print()
         return 1
     if str(dev.locked) != "0":
-        print(paint("  ⛔ 设备当前已是锁定状态，无需回锁。", C.YELLOW + C.BOLD))
+        print(paint("   设备当前已是锁定状态，无需回锁。", C.YELLOW + C.BOLD))
         print()
         return 1
 
@@ -1613,14 +1740,14 @@ def cmd_relock(args: argparse.Namespace) -> int:
         if suit is PackageSuitability.UNKNOWN and is_platform_name(dev.codename):
             # fastboot 下只有平台名（如 pineapple），无法比对机型。
             # 只警告，不阻断 —— 由用户自行确认包与机型一致后继续回锁。
-            print(paint("  ⚠ 无法自动核对机型（fastboot 只返回平台名）", C.YELLOW + C.BOLD))
+            print(paint("   无法自动核对机型（fastboot 只返回平台名）", C.YELLOW + C.BOLD))
             print(f"     当前读到：{dev.codename or '?'}（SoC 平台名，不是机型）")
             print()
             print("     请自行确认：此包机型/区域与本机【完全一致】，")
             print("     且两个槽都是本机原厂签名镜像。")
             print()
         else:
-            print(paint("  ⛔ 回锁包校验未通过，拒绝继续：", C.RED + C.BOLD))
+            print(paint("   回锁包校验未通过，拒绝继续：", C.RED + C.BOLD))
             for r in suit_reasons:
                 print(f"     · {r}")
             print()
@@ -1628,7 +1755,7 @@ def cmd_relock(args: argparse.Namespace) -> int:
             print()
             return 1
     if suit is PackageSuitability.OK:
-        print(paint("  ✓ 包校验：同机型完整官方全量包", C.GREEN))
+        print(paint("   包校验：同机型完整官方全量包", C.GREEN))
 
     plan = build_relock_plan(
         device_model=dev.model or "",
@@ -1656,7 +1783,7 @@ def cmd_relock(args: argparse.Namespace) -> int:
         print("    □ 已备份 ocdt / persist（回锁失败时这些是最后救命稻草）")
         print("    □ 电量 > 50%，使用原装数据线，直连 USB")
         print()
-        print(paint("  ⚠ 特别注意（社区实测必砖场景）：", C.YELLOW + C.BOLD))
+        print(paint("   特别注意（社区实测必砖场景）：", C.YELLOW + C.BOLD))
         print("    · 非官方手段解锁过的设备（ocdt 签名被抹）→ 回锁基本不可能")
         print("    · 跨区包 / 第三方 ROM 回锁 → 签名对不上，必砖")
         print("    · 已 ARB 熔断 / 9008 已失效的机型 → 回锁后出事无自救通道")
@@ -1682,7 +1809,7 @@ def cmd_relock(args: argparse.Namespace) -> int:
         print(paint(f"  [{label}] 切换到 {slot} 槽…", C.CYAN))
         res_sw = fb.run(f"--set-active={slot}", timeout=120)
         if not fb.ok(res_sw):
-            print(paint(f"  ⛔ 切换到 {slot} 槽失败：{res_sw.combined.strip()[:200]}", C.RED))
+            print(paint(f"   切换到 {slot} 槽失败：{res_sw.combined.strip()[:200]}", C.RED))
             return (False, [f"切换{slot}槽失败"])
 
         print()
@@ -1719,13 +1846,13 @@ def cmd_relock(args: argparse.Namespace) -> int:
         _print_lock_device_prompt()
         res = fb.run("flashing", "lock", timeout=300)
         if not fb.ok(res):
-            print(paint(f"  ⛔ 回锁命令失败：{res.combined.strip()[:200]}", C.RED + C.BOLD))
+            print(paint(f"   回锁命令失败：{res.combined.strip()[:200]}", C.RED + C.BOLD))
             print("     常见原因：设备端选了 do not lock（取消回锁），或镜像非原厂签名。")
             print("     设备仍解锁，可重新运行本命令再试。")
             print()
             return 1
         print()
-        print(paint("  ✓ 回锁成功。设备会格式化数据并重启。", C.GREEN + C.BOLD))
+        print(paint("   回锁成功。设备会格式化数据并重启。", C.GREEN + C.BOLD))
         print("     首次开机较慢（重新加密数据），属正常现象。")
         print()
         return 0
@@ -1742,14 +1869,14 @@ def cmd_relock(args: argparse.Namespace) -> int:
 
     first_ok, first_failed = _flash_slot(other, f"1/2（{other} 槽）")
     if not first_ok:
-        print(paint("  ⛔ 第一轮平刷失败，已中止，不会回锁。", C.RED + C.BOLD))
+        print(paint("   第一轮平刷失败，已中止，不会回锁。", C.RED + C.BOLD))
         print(paint("     设备当前处于刷了一半的状态，请重新平刷完整包后再试。", C.RED))
         print()
         return 1
 
     second_ok, second_failed = _flash_slot(cur, f"2/2（{cur} 槽）")
     if not second_ok:
-        print(paint("  ⛔ 第二轮平刷失败，已中止，不会回锁。", C.RED + C.BOLD))
+        print(paint("   第二轮平刷失败，已中止，不会回锁。", C.RED + C.BOLD))
         print()
         return 1
 
@@ -1766,7 +1893,7 @@ def cmd_relock(args: argparse.Namespace) -> int:
     )
     print()
     if not check.can_relock:
-        print(paint("  ⛔ 两槽一致性校验未通过，拒绝回锁：", C.RED + C.BOLD))
+        print(paint("   两槽一致性校验未通过，拒绝回锁：", C.RED + C.BOLD))
         for r in check.reasons:
             print(f"     · {r}")
         print()
@@ -1775,14 +1902,14 @@ def cmd_relock(args: argparse.Namespace) -> int:
         print()
         return 1
 
-    print(paint(f"  ✓ 两槽都刷入了同一原厂包（{other} + {cur}），均成功", C.GREEN + C.BOLD))
+    print(paint(f"   两槽都刷入了同一原厂包（{other} + {cur}），均成功", C.GREEN + C.BOLD))
     print()
 
     # ---- 6) 确保激活槽回到原槽（第二轮已刷到 cur，这里再确认一次）----
     print(paint(f"  确认激活槽为 {cur}…", C.CYAN))
     res = fb.run(f"--set-active={cur}", timeout=120)
     if not fb.ok(res):
-        print(paint("  ⛔ 切回原槽失败，已中止，不会回锁。", C.RED + C.BOLD))
+        print(paint("   切回原槽失败，已中止，不会回锁。", C.RED + C.BOLD))
         print()
         return 1
 
@@ -1791,14 +1918,14 @@ def cmd_relock(args: argparse.Namespace) -> int:
     _print_lock_device_prompt()
     res = fb.run("flashing", "lock", timeout=300)
     if not fb.ok(res):
-        print(paint(f"  ⛔ 回锁命令失败：{res.combined.strip()[:200]}", C.RED + C.BOLD))
+        print(paint(f"   回锁命令失败：{res.combined.strip()[:200]}", C.RED + C.BOLD))
         print("     常见原因：设备端选了 do not lock（取消回锁），或镜像非原厂签名。")
         print("     设备仍解锁，可重新运行本命令再试。")
         print()
         return 1
 
     print()
-    print(paint("  ✓ 回锁成功。设备会格式化数据并重启。", C.GREEN + C.BOLD))
+    print(paint("   回锁成功。设备会格式化数据并重启。", C.GREEN + C.BOLD))
     print("     首次开机较慢（重新加密数据），属正常现象。")
     print()
     return 0
@@ -1886,7 +2013,7 @@ def cmd_arb(args: argparse.Namespace) -> int:
         if dev_note:
             print(f"  原因：{dev_note}")
             print()
-        print("  ⚠ 无法确认设备侧 ARB 时，请勿降级到更低的系统版本。")
+        print("   无法确认设备侧 ARB 时，请勿降级到更低的系统版本。")
         print()
         if pkg_arb is not None:
             if pkg_arb.arb_index >= 1:
@@ -1957,7 +2084,7 @@ def cmd_root(args: argparse.Namespace) -> int:
     # --- 定位镜像 ---
     image = _find_stock_image(args.image)
     if image is None:
-        print(paint("  ⛔ 找不到原厂镜像。", C.RED))
+        print(paint("   找不到原厂镜像。", C.RED))
         print()
         print("  请先从全量 ROM 包解出 init_boot：")
         print(f"    {paint('./lrom unpack <ROM包> --partitions init_boot', C.CYAN)}")
@@ -1968,13 +2095,13 @@ def cmd_root(args: argparse.Namespace) -> int:
     # --- 设备状态 ---
     device = detect(adb_server_port=args.adb_port)
     if device is None:
-        print(paint("  ⛔ 未检测到设备。", C.RED))
+        print(paint("   未检测到设备。", C.RED))
         print("  请先连接设备并确认能识别（./lrom devices）。")
         print()
         return 1
 
     if device.mode is DeviceMode.FASTBOOT or device.mode is DeviceMode.FASTBOOTD:
-        print(paint("  ⚠ 设备当前在 fastboot 模式。", C.YELLOW))
+        print(paint("   设备当前在 fastboot 模式。", C.YELLOW))
         print("  root 流程需要先读取设备信息，请开机启动后再运行。")
         print()
         return 1
@@ -1982,13 +2109,13 @@ def cmd_root(args: argparse.Namespace) -> int:
     if device.locked is None:
         print(
             paint(
-                "  ⚠ 无法确认 Bootloader 是否已解锁，请自行确认。",
+                "   无法确认 Bootloader 是否已解锁，请自行确认。",
                 C.YELLOW,
             )
         )
         print()
     elif str(device.locked) != "0":
-        print(paint("  ⛔ Bootloader 未解锁，无法刷写。", C.RED))
+        print(paint("   Bootloader 未解锁，无法刷写。", C.RED))
         print()
         print("  可能的原因：")
         print("    · 从未执行过 OEM 解锁（开发者选项 → OEM 解锁）")
@@ -2058,7 +2185,7 @@ def cmd_root(args: argparse.Namespace) -> int:
             copy_file=not is_unpacked_stock,
         )
     except OSError as exc:
-        print(paint(f"  ⛔ 记录原厂镜像失败：{exc}", C.RED))
+        print(paint(f"   记录原厂镜像失败：{exc}", C.RED))
         print("  为安全起见已中止（没有底图指纹就不刷写）。")
         print()
         return 1
@@ -2082,7 +2209,7 @@ def cmd_root(args: argparse.Namespace) -> int:
             on_line=lambda s: None,
         )
         if not result.ok:
-            print(paint(f"  ⛔ {result.message}", C.RED))
+            print(paint(f"   {result.message}", C.RED))
             print()
             return 1
         patched = result.output
@@ -2103,15 +2230,15 @@ def cmd_root(args: argparse.Namespace) -> int:
                 on_notice=lambda m: print(f"        {m}"),
             )
         except Exception as exc:  # noqa: BLE001
-            print(paint(f"  ⛔ 获取 patch 引擎失败：{exc}", C.RED))
+            print(paint(f"   获取 patch 引擎失败：{exc}", C.RED))
             print()
             return 1
         for w in eng.warnings:
-            print(paint(f"        ⚠ {w}", C.YELLOW))
+            print(paint(f"         {w}", C.YELLOW))
         out = workdir / f"{plan.partition}-patched-{time_str()}.img"
         result = offline_patch(image, out, kmi=plan.kmi, engine=eng, on_line=lambda s: None)
         if not result.ok:
-            print(paint(f"  ⛔ {result.message}", C.RED))
+            print(paint(f"   {result.message}", C.RED))
             print()
             return 1
         patched = result.output
@@ -2124,7 +2251,7 @@ def cmd_root(args: argparse.Namespace) -> int:
         try:
             remote = rt.push_for_app_patch(image=image, adb=adb)
         except rt.RootError as exc:
-            print(paint(f"  ⛔ {exc}", C.RED))
+            print(paint(f"   {exc}", C.RED))
             print()
             return 1
         print(f"        已推送到 {remote}")
@@ -2145,11 +2272,11 @@ def cmd_root(args: argparse.Namespace) -> int:
         try:
             patched = rt.pull_app_patched(dest_dir=workdir, adb=adb)
         except rt.RootError as exc:
-            print(paint(f"  ⛔ {exc}", C.RED))
+            print(paint(f"   {exc}", C.RED))
             print()
             return 1
         if patched is None:
-            print(paint("  ⛔ 没在设备上找到修补后的镜像。", C.RED))
+            print(paint("   没在设备上找到修补后的镜像。", C.RED))
             print("  请确认 Manager 已导出 .img 到 Download 目录。")
             print()
             return 1
@@ -2162,12 +2289,12 @@ def cmd_root(args: argparse.Namespace) -> int:
         stock=image, patched=patched, partition_size=plan.partition_size
     )
     if not ok:
-        print(paint("  ⛔ 校验未通过，已中止（不会刷入）：", C.RED))
+        print(paint("   校验未通过，已中止（不会刷入）：", C.RED))
         for p in problems:
             print(f"        - {p}")
         print()
         return 1
-    print("        ✓ 大小、header、ramdisk、AVB footer 均正常")
+    print("         大小、header、ramdisk、AVB footer 均正常")
     print(f"        sha256 {rt._sha256(patched)[:32]}…")
 
     # --- 步骤 4：刷写 ---
@@ -2185,7 +2312,7 @@ def cmd_root(args: argparse.Namespace) -> int:
         on_notice=lambda msg: print(paint(f"        {msg}", C.YELLOW)),
     )
     if not ok:
-        print(paint("  ⛔ 刷写失败：", C.RED))
+        print(paint("   刷写失败：", C.RED))
         print(f"    {detail}")
         print()
         print(f"  原厂镜像已保存在：")
@@ -2200,7 +2327,7 @@ def cmd_root(args: argparse.Namespace) -> int:
         )
         print()
         return 1
-    print("        ✓ 刷写完成")
+    print("         刷写完成")
 
     # --- 步骤 5：收尾（永不自动重启）---
     print()
@@ -2268,7 +2395,7 @@ def cmd_fetch_manager(args: argparse.Namespace) -> int:
     try:
         source = mf.resolve_manager_source(args.source)
     except mf.FetchError as exc:
-        print(paint(f"  ⛔ {exc}", C.RED))
+        print(paint(f"   {exc}", C.RED))
         print()
         return 1
 
@@ -2281,7 +2408,7 @@ def cmd_fetch_manager(args: argparse.Namespace) -> int:
     try:
         release = mf.fetch_latest_release(source, channel=args.channel)
     except mf.FetchError as exc:
-        print(paint(f"  ⛔ {exc}", C.RED))
+        print(paint(f"   {exc}", C.RED))
         print()
         return 1
 
@@ -2321,7 +2448,7 @@ def cmd_fetch_manager(args: argparse.Namespace) -> int:
         else:
             asset = mf.pick_asset(release, source, device_abi=device_abi)
     except mf.FetchError as exc:
-        print(paint(f"  ⛔ {exc}", C.RED))
+        print(paint(f"   {exc}", C.RED))
         print()
         return 1
 
@@ -2358,12 +2485,12 @@ def cmd_fetch_manager(args: argparse.Namespace) -> int:
         )
     except mf.FetchError as exc:
         print()
-        print(paint(f"  ⛔ {exc}", C.RED))
+        print(paint(f"   {exc}", C.RED))
         print()
         return 1
 
     print("\r" + " " * 50 + "\r", end="")
-    print(paint("  ✓ 下载完成，校验通过", C.GREEN))
+    print(paint("   下载完成，校验通过", C.GREEN))
     print()
     # 下载后的本机物理位置要明确标注，避免用户找不到文件
     abs_path = path.resolve()
@@ -2376,12 +2503,12 @@ def cmd_fetch_manager(args: argparse.Namespace) -> int:
         abs_path, adb_server_port=getattr(args, "adb_port", None)
     )
     if status == "installed":
-        print(paint("  ✓ 已自动安装到设备", C.GREEN))
+        print(paint("   已自动安装到设备", C.GREEN))
         # 装进设备后就删掉本地安装包，避免残留在磁盘上
         # （只在安装成功时删；失败或没设备时必须留着，供手动安装）
         try:
             abs_path.unlink()
-            print(paint("  ✓ 已删除本地安装包（无需保留）", C.DIM))
+            print(paint("   已删除本地安装包（无需保留）", C.DIM))
         except OSError as exc:  # noqa: BLE001
             print(paint(f"  ! 本地安装包删除失败：{exc}", C.YELLOW))
             print(f"    {abs_path}")
@@ -2389,7 +2516,7 @@ def cmd_fetch_manager(args: argparse.Namespace) -> int:
         print(paint("  ! 未检测到设备，APK 已保存在本机", C.YELLOW))
         print(f"    {detail}")
     else:
-        print(paint("  ⛔ 自动安装失败", C.RED))
+        print(paint("   自动安装失败", C.RED))
         print(f"    {detail}")
         print(paint(f"    可手动安装：adb install -r {abs_path}", C.CYAN))
     print()

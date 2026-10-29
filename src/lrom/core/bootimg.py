@@ -103,7 +103,7 @@ class BootImageInfo:
             f"内核大小  : {self.kernel_size:,} 字节"
             + ("（无内核）" if self.kernel_size == 0 else ""),
             f"ramdisk   : {self.ramdisk_size:,} 字节"
-            + ("（⚠ 没有 ramdisk）" if not self.has_ramdisk else ""),
+            + ("（ 没有 ramdisk）" if not self.has_ramdisk else ""),
         ]
         if self.ramdisk_compression:
             lines.append(f"ramdisk取 : {self.ramdisk_compression}")
@@ -235,7 +235,7 @@ def check_ramdisk(path: Path, *, partition: str | None = None) -> tuple[bool, st
 
     # 没有 ramdisk —— 这是最危险的情况
     return False, (
-        f"⛔ {name} 的 ramdisk_size = 0，**这个分区里没有 ramdisk**。\n"
+        f" {name} 的 ramdisk_size = 0，**这个分区里没有 ramdisk**。\n"
         "\n"
         "   从 Android 13（GKI 2.0）起，通用 ramdisk 已从 boot 移到 init_boot。\n"
         "   而对没有 ramdisk 的镜像做 patch，Magisk / KernelSU 不会报错，\n"

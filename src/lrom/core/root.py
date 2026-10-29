@@ -217,13 +217,13 @@ class RootPlan:
             lines.append("")
 
         if self.warnings:
-            lines.append("  ⚠️  注意事项：")
+            lines.append("    注意事项：")
             for w in self.warnings:
                 lines.append(f"     - {w}")
             lines.append("")
 
         if self.blockers:
-            lines.append("  ⛔ 阻止执行的问题：")
+            lines.append("   阻止执行的问题：")
             for b in self.blockers:
                 lines.append(f"     {b}")
             lines.append("")
@@ -770,7 +770,7 @@ def flash_patched_image(
     """
     fastboot = fastboot or FastbootRunner()
 
-    # ★ 先确保设备真的在目标模式，否则 fastboot flash 会空等
+    #  先确保设备真的在目标模式，否则 fastboot flash 会空等
     if flash_mode is FlashMode.FASTBOOTD:
         ok, detail = enter_fastbootd(fastboot=fastboot, on_notice=on_notice)
         if not ok:

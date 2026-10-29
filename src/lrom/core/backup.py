@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import shutil
 import subprocess
 import time
@@ -140,6 +141,63 @@ ROOT_REQUIRED = frozenset(
 
 #: 这些分区缺失时不算失败（部分机型没有对应分区）
 OPTIONAL_PARTITIONS = frozenset({"fsg"})
+
+#: 「全备份」默认跳过的分区：用户数据/缓存，体积大且无回滚价值（含隐私）。
+#: 其它分区（包括 super 系统分区、A/B 两槽的全部物理分区）默认全部回读，
+#: 对齐紫罗兰「备份字库 = 备份设备分区」。
+FULL_BACKUP_EXCLUDE = frozenset({"userdata", "cache"})
+
+
+def sanitize_component(name: str) -> str:
+    """把机型/代号清洗成可安全用作目录名的片段。"""
+    s = re.sub(r"[^0-9A-Za-z._-]+", "_", (name or "").strip())
+    return s.strip("._-") or "unknown"
+
+
+def device_label(device: Device) -> str:
+    """备份命名的「机型」部分：优先真实机型（如 OPD2404），退化到代号。
+
+    注意 device.codename 是**代号**（OP5D77L1），不是「机型」。用户要的是
+    「机型_日期」，所以优先 model，其次 product_name，最后才 fallback 到代号。
+    """
+    for cand in (device.model, device.product_name, device.codename):
+        if cand:
+            return sanitize_component(cand)
+    return "unknown"
+
+
+def list_device_partitions(
+    adb: AdbRunner,
+    root_prefix: str = "su -c",
+    exclude: frozenset[str] = FULL_BACKUP_EXCLUDE,
+) -> list[str]:
+    """列出设备上**所有**可备份分区（``/dev/block/by-name`` 下的节点名）。
+
+    用于「默认全备份」：不再只备精选清单，而是把设备实际存在的分区全部回读。
+    需要 root。默认排除 userdata/cache（用户数据、体积大且无回滚价值）。
+
+    排序：先把 ``DEFAULT_BACKUP_PARTITIONS`` 里的关键分区按原顺序排前面
+    （OCDT 依然排第一，方便用户核对），其余按字母序追加。
+    """
+    res = adb.shell(f"{root_prefix} 'ls /dev/block/by-name/'", timeout=30)
+    if res.exit_code != 0:
+        return []
+
+    found: list[str] = []
+    seen: set[str] = set()
+    for raw in res.stdout.split():
+        name = raw.strip()
+        if not name or name in exclude or name in seen:
+            continue
+        # 跳过整盘别名（sda/sdb…）与明显的临时节点
+        if name.startswith("sd") and name[-1].isalpha():
+            continue
+        seen.add(name)
+        found.append(name)
+
+    priority = [p for p in DEFAULT_BACKUP_PARTITIONS if p in seen]
+    rest = sorted(n for n in found if n not in set(priority))
+    return priority + rest
 
 
 @dataclass
@@ -273,11 +331,15 @@ def backup_partition_adb(
     *,
     slot: str | None,
     root_prefix: str = "su -c",
+    on_progress=None,
 ) -> BackupResult:
     """用 adb + root dd 备份单个分区。
 
     需要 root（给 adb shell 授予 root 权限）：读取 /dev/block 需要 uid=0。
     分区在本机不存在时返回 missing=True（跳过，不算失败）。
+
+    ``on_progress(partition, done_bytes, total_bytes, elapsed_s)`` 在写入过程中
+    约每秒回调一次，用于实时显示已用时长/进度，避免用户误以为卡死。
     """
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -306,12 +368,31 @@ def backup_partition_adb(
         env.update(adb.env)
 
     tmp = out_path.with_suffix(out_path.suffix + ".part")
-    try:
-        with open(tmp, "wb") as f:
-            proc = subprocess.Popen(argv, stdout=f, stderr=subprocess.PIPE, env=env)
-            _, err = proc.communicate(timeout=1800)
-    except subprocess.TimeoutExpired:
-        proc.kill()
+    start = time.monotonic()
+    timed_out = False
+    with open(tmp, "wb") as f:
+        proc = subprocess.Popen(argv, stdout=f, stderr=subprocess.PIPE, env=env)
+        while True:
+            try:
+                proc.wait(timeout=1.0)
+                break
+            except subprocess.TimeoutExpired:
+                if on_progress is not None:
+                    try:
+                        done = tmp.stat().st_size
+                    except OSError:
+                        done = 0
+                    on_progress(
+                        partition, done, expected, time.monotonic() - start
+                    )
+                if time.monotonic() - start > 1800:
+                    proc.kill()
+                    proc.wait()
+                    timed_out = True
+                    break
+        err = proc.stderr.read() if proc.stderr else b""
+
+    if timed_out:
         tmp.unlink(missing_ok=True)
         return BackupResult(partition, None, ok=False, error="备份超时")
 
@@ -416,8 +497,13 @@ def estimate_size(adb: AdbRunner, partitions: list[str], slot: str | None) -> in
 
 
 def new_session_dir(base: Path, device: Device) -> Path:
+    """创建本次备份目录，命名为「机型_日期」（如 ``OPD2404_20261029-013451``）。
+
+    旧实现用代号（OP5D77L1）命名，代号不是机型；现按用户要求改用真实机型
+    （device.model），并保留日期时间戳，便于区分多次备份。
+    """
     stamp = datetime.now(timezone.utc).astimezone().strftime("%Y%m%d-%H%M%S")
-    name = f"{device.codename or 'unknown'}_{stamp}"
+    name = f"{device_label(device)}_{stamp}"
     path = base / name
     path.mkdir(parents=True, exist_ok=True)
     return path

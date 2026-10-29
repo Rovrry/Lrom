@@ -242,7 +242,7 @@ def read_device_arb_fastboot(
 
     需要设备处于 fastboot 模式，且 bootloader 支持 fetch 命令。
 
-    ⚠️ 这里是曾经会「挂死 6 分钟」的地方，务必遵守三条：
+     这里是曾经会「挂死 6 分钟」的地方，务必遵守三条：
       1. **先确认设备在线**。fastboot 在没有设备时会无限等待
          ``< waiting for any device >``，只能靠外部 timeout 杀掉。
       2. **先探测 max-fetch-size**。不支持 fetch 的 bootloader
